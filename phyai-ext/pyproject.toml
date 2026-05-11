@@ -1,0 +1,28 @@
+[project]
+name = "phyai-ext"
+version = "0.1.0"
+description = "CMake AOT-compiled extensions for phyai."
+requires-python = ">=3.12"
+dependencies = [
+    "phyai",
+    "apache-tvm-ffi",
+]
+
+[build-system]
+requires = ["scikit-build-core>=0.10", "apache-tvm-ffi"]
+build-backend = "scikit_build_core.build"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "build/{wheel_tag}"
+
+[tool.uv]
+cache-keys = [
+    { file = "pyproject.toml" },
+    { file = "CMakeLists.txt" },
+    { file = "csrc/**/*.{h,c,hpp,cpp,cc,cxx,cu,cuh}" },
+    { file = "include/**/*.{h,hpp,cuh}" },
+]
+
+[tool.uv.sources]
+phyai = { workspace = true }

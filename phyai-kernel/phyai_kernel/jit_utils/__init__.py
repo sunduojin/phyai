@@ -1,0 +1,41 @@
+"""phyai-kernel JIT compilation utilities (tvm-ffi based)."""
+
+from .compile import (
+    PHYAI_KERNEL_CACHE_ROOT,
+    PHYAI_KERNEL_CPU_CSRC_DIR,
+    PHYAI_KERNEL_CPU_INCLUDE_DIR,
+    PHYAI_KERNEL_CPU_PATH,
+    PHYAI_KERNEL_CUDA_CSRC_DIR,
+    PHYAI_KERNEL_CUDA_INCLUDE_DIR,
+    PHYAI_KERNEL_CUDA_PATH,
+    PHYAI_KERNEL_INCLUDE_DIR,
+    PHYAI_KERNEL_TOP_PATH,
+    cache_once,
+    clear_jit_kernel_registry,
+    get_jit_kernel_registry,
+    jit,
+    load_cpu_jit,
+    load_cuda_jit,
+    make_cpp_args,
+    register_jit_kernel,
+)
+
+__all__ = [
+    "PHYAI_KERNEL_CACHE_ROOT",
+    "PHYAI_KERNEL_CPU_CSRC_DIR",
+    "PHYAI_KERNEL_CPU_INCLUDE_DIR",
+    "PHYAI_KERNEL_CPU_PATH",
+    "PHYAI_KERNEL_CUDA_CSRC_DIR",
+    "PHYAI_KERNEL_CUDA_INCLUDE_DIR",
+    "PHYAI_KERNEL_CUDA_PATH",
+    "PHYAI_KERNEL_INCLUDE_DIR",
+    "PHYAI_KERNEL_TOP_PATH",
+    "cache_once",
+    "clear_jit_kernel_registry",
+    "get_jit_kernel_registry",
+    "jit",
+    "load_cpu_jit",
+    "load_cuda_jit",
+    "make_cpp_args",
+    "register_jit_kernel",
+]

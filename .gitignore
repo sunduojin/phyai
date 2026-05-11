@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+uv.lock
+
+# Packaging / build
+build/
+dist/
+wheels/
+*.egg
+*.egg-info/
+*.whl
+.eggs/
+
+# Virtual envs
+.venv/
+.python-version
+
+# Env files
+.env
+.env.*
+!.env.example
+.envrc
+
+# Test / coverage / type-check caches
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / editor
+.vscode/settings.json
+.idea/
+*.swp
+*.swo
+*~
+
+# clangd index
+.cache/
+
+# CMake / scikit-build-core
+_skbuild/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# Native build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.pyd
+*.exp
+*.ilk
+*.pdb
+
+# Native coverage (gcov/lcov)
+*.gcov
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# CUDA intermediates
+*.cubin
+*.ptx
+*.fatbin
+*.i
+*.ii
+
+# Logs
+*.log
+.tmp/
+.draft_doc/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# claude
+.claude/settings.local.json

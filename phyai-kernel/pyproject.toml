@@ -1,0 +1,24 @@
+[project]
+name = "phyai-kernel"
+version = "0.1.0"
+description = "JIT-compiled CPU/CUDA kernels for phyai via tvm-ffi."
+requires-python = ">=3.12"
+dependencies = [
+    "apache-tvm-ffi>=0.1.8",
+    "packaging",
+    "torch",
+    "torch-c-dlpack-ext",
+]
+
+[project.scripts]
+phyai-kernel = "phyai_kernel.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["phyai_kernel"]
+
+[tool.hatch.build.targets.sdist]
+include = ["phyai_kernel", "tests", "README.md"]

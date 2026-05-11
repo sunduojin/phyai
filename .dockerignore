@@ -1,0 +1,128 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+.github/
+
+# Docker
+.dockerignore
+Dockerfile*
+docker-compose*.yml
+docker/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Packaging / build
+build/
+dist/
+wheels/
+*.egg
+*.egg-info/
+*.whl
+.eggs/
+
+# Virtual envs
+.venv/
+venv/
+.python-version
+
+# Env files
+.env
+.env.*
+!.env.example
+.envrc
+
+# Test / coverage / type-check caches
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+.pyre/
+.pytype/
+.ruff_cache/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# clangd / C++ tooling
+.cache/
+.clangd
+.clang-format
+.clang-tidy
+compile_commands.json
+
+# CMake / scikit-build-core
+_skbuild/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+
+# Native build artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.so.*
+*.dylib
+*.dll
+*.pyd
+*.exp
+*.ilk
+*.pdb
+
+# Native coverage (gcov/lcov)
+*.gcov
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+
+# CUDA intermediates
+*.cubin
+*.ptx
+*.fatbin
+*.i
+*.ii
+
+# Logs / scratch
+*.log
+.tmp/
+.draft_doc/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude / agents
+.claude/
+
+# Repo-local docs & examples (not needed at runtime)
+docs/
+examples/
+scripts/
+
+# Pre-commit / linting configs
+.pre-commit-config.yaml
+.codespellrc
+.editorconfig

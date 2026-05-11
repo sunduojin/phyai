@@ -1,0 +1,65 @@
+"""LinearKernel Protocol + descriptive dataclasses.
+
+A ``KernelProbe`` is the dispatcher's query packet, and ``LinearKernel``
+is a pure-capability Protocol each backend implements. There is no
+``score()`` — priority is the Registry's job (see
+:mod:`phyai.layers.linear.registry`).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from enum import Enum
+from typing import Protocol, runtime_checkable
+
+import torch
+
+from phyai.parallel.state import Mode
+
+
+class Granularity(Enum):
+    """How a scale tensor is laid out relative to the weight."""
+
+    PER_TENSOR = "per_tensor"
+    PER_CHANNEL = "per_channel"
+    BLOCK = "block"
+
+
+@dataclass(frozen=True)
+class KernelProbe:
+    """The query packet the dispatcher hands to the registry.
+
+    Fields are chosen so that ``(probe)`` is uniquely keyable into a cache
+    and carries everything a ``LinearKernel.can_handle`` predicate needs.
+    """
+
+    spec_id: str
+    M_bucket: int
+    N: int
+    K: int
+    in_dtype: torch.dtype
+    out_dtype: torch.dtype
+    sm: int
+    mode: Mode
+
+
+@runtime_checkable
+class LinearKernel(Protocol):
+    """Pure-capability Protocol each matmul backend implements.
+
+    Hot path is :meth:`apply`; :meth:`can_handle` is consulted on cache
+    miss only and returns a bool (no scoring).
+    """
+
+    name: str
+
+    def can_handle(self, probe: KernelProbe) -> bool: ...
+
+    def supports_capture(self) -> bool: ...
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor: ...
