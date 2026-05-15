@@ -45,13 +45,6 @@ from phyai.layers.linear.registry import (
     Policy,
 )
 from phyai.layers.linear.spec import ActivationView, Bf16Spec, Fp8Spec
-from phyai.layers.placement import (
-    CopyPlacement,
-    Placement,
-    Slice1D,
-    ZeroPlacement,
-    apply_placements,
-)
 from phyai.layers.quant import AllocationRequest, WeightSpec
 from phyai.utils.cuda import sm_arch
 
@@ -123,12 +116,6 @@ __all__ = [
     "AllocationRequest",
     "WeightSpec",
     "Granularity",
-    # placement
-    "Placement",
-    "CopyPlacement",
-    "ZeroPlacement",
-    "Slice1D",
-    "apply_placements",
     # dispatcher / registry
     "KernelDispatcher",
     "get_linear_dispatcher",

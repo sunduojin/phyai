@@ -18,11 +18,11 @@ Two classes, intentionally independent:
 
 Padding: ``num_embeddings`` is rounded up to a multiple of
 ``tp_size * padding_multiple`` (default ``padding_multiple=64``). The
-trailing rank produces a :class:`~phyai.layers.placement.ZeroPlacement`
-for its padding overhang in addition to the :class:`CopyPlacement` for
-the real-vocab portion, so embeddings of out-of-range token ids are
-guaranteed-zero rows and LM-head logits over padding columns are
-guaranteed-zero scalars — no sampler reindex needed.
+:func:`phyai.weights.shards.vocab` loader writes the real-vocab portion
+into the trailing rank's per-rank slice and zeroes any padding overhang
+inline — no separate Zero placement pass needed. Embeddings of
+out-of-range token ids are guaranteed-zero rows and LM-head logits over
+padding columns are guaranteed-zero scalars.
 """
 
 from __future__ import annotations
@@ -34,17 +34,11 @@ import torch.nn as nn
 
 import phyai.parallel as P
 from phyai.layers.linear.dispatch import get_linear_dispatcher
-from phyai.layers.placement import (
-    CopyPlacement,
-    Placement,
-    Slice1D,
-    ZeroPlacement,
-    split_prefix,
-)
 from phyai.layers.quant import AllocationRequest
 from phyai.layers.quant.bf16 import Bf16Spec
 from phyai.layers.vocab_embedding.ops import masked_embedding_lookup
 from phyai.parallel.state import resolve_mesh
+from phyai.weights.shards import vocab
 
 
 def pad_vocab_to(num_embeddings: int, tp_size: int, multiple: int = 64) -> int:
@@ -69,50 +63,6 @@ def _M_of(x: torch.Tensor) -> int:
     for s in x.shape[:-1]:
         M *= int(s)
     return M
-
-
-def _vocab_placements(
-    *,
-    prefix: str,
-    num_embeddings: int,
-    num_embeddings_padded: int,
-    tp_rank: int,
-    tp_size: int,
-) -> list[Placement]:
-    """Per-rank placements for a vocab-parallel weight.
-
-    Both :class:`VocabParallelEmbedding` and the un-tied
-    :class:`ParallelLMHead` write the same on-disk ``(V_real, D)``
-    HF tensor into the same per-rank ``(V_padded // tp_size, D)`` shape,
-    so they share one helper.
-    """
-    parent, own = split_prefix(prefix)
-    hf_base = f"{parent}.{own}" if parent else own
-    per_rank = num_embeddings_padded // tp_size
-    start = tp_rank * per_rank
-    end = start + per_rank
-    real_start = min(max(start, 0), num_embeddings)
-    real_end = min(end, num_embeddings)
-    n_real = max(0, real_end - real_start)
-
-    out: list[Placement] = []
-    if n_real > 0:
-        out.append(
-            CopyPlacement(
-                hf_key=f"{hf_base}.weight",
-                phyai_key=f"{prefix}.weight",
-                src_slices=(Slice1D(0, real_start, n_real),),
-                dst_slices=(Slice1D(0, 0, n_real),),
-            )
-        )
-    if n_real < per_rank:
-        out.append(
-            ZeroPlacement(
-                phyai_key=f"{prefix}.weight",
-                dst_slices=(Slice1D(0, n_real, per_rank - n_real),),
-            )
-        )
-    return out
 
 
 class VocabParallelEmbedding(nn.Module):
@@ -211,6 +161,10 @@ class VocabParallelEmbedding(nn.Module):
             ),
         )
 
+        if prefix:
+            self.weight.hf_keys = [(f"{prefix}.weight", None)]
+            self.weight.weight_loader = vocab(axis=axis, mesh=mesh_obj)
+
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         local = masked_embedding_lookup(
             input_ids,
@@ -223,15 +177,6 @@ class VocabParallelEmbedding(nn.Module):
         if self.embed_scale != 1.0:
             local = local * self._embed_scale_t.to(local.dtype)
         return local
-
-    def placements(self) -> list[Placement]:
-        return _vocab_placements(
-            prefix=self.prefix,
-            num_embeddings=self.num_embeddings,
-            num_embeddings_padded=self.num_embeddings_padded,
-            tp_rank=self.tp_rank,
-            tp_size=self.tp_size,
-        )
 
     def extra_repr(self) -> str:
         s = (
@@ -351,6 +296,9 @@ class ParallelLMHead(nn.Module):
                 ),
             )
             self._tied = False
+            if prefix:
+                self.weight.hf_keys = [(f"{prefix}.weight", None)]
+                self.weight.weight_loader = vocab(axis=axis, mesh=mesh_obj)
 
         self.register_parameter("bias", None)
 
@@ -367,18 +315,6 @@ class ParallelLMHead(nn.Module):
         if self.gather_output and self.tp_size > 1:
             y = P.all_gather(y, axis=self.axis, dim=-1, mesh=self.mesh_name)
         return y
-
-    def placements(self) -> list[Placement]:
-        """Empty list when tied — the embedding owns the placements."""
-        if self._tied:
-            return []
-        return _vocab_placements(
-            prefix=self.prefix,
-            num_embeddings=self.num_embeddings,
-            num_embeddings_padded=self.num_embeddings_padded,
-            tp_rank=self.tp_rank,
-            tp_size=self.tp_size,
-        )
 
     def extra_repr(self) -> str:
         return (

@@ -95,6 +95,7 @@ Limitations
 
 from __future__ import annotations
 
+from types import MappingProxyType
 from typing import Any, Mapping
 
 import torch
@@ -107,15 +108,27 @@ from phyai.layers.linear.layers import (
     RowParallelLinear,
 )
 from phyai.layers.mlp.dense_mlp import DenseMLP
-from phyai.layers.placement import Placement
 
 
-# Required keys in ``norm_hf_names`` per topology. The block is a
-# structural primitive; the actual HF strings live in the model file
-# (``models/{family}/__init__.py`` once those exist).
-_REQUIRED_NORM_KEYS_PRE: frozenset[str] = frozenset({"input_norm", "pre_ff_norm"})
-_REQUIRED_NORM_KEYS_SANDWICH: frozenset[str] = frozenset(
-    {"input_norm", "post_attn_norm", "pre_ff_norm", "post_ff_norm"}
+# HuggingFace de-facto norm naming defaults. Llama / Qwen2 / Qwen3 / Mistral /
+# Phi3 / Olmo all use ``input_layernorm`` + ``post_attention_layernorm``;
+# Gemma2 / Gemma3 add ``pre_feedforward_layernorm`` + ``post_feedforward_layernorm``
+# for the sandwich-norm topology. The mapping is ``phyai_slot -> hf_default``.
+# The user-facing override dict is keyed by ``hf_default`` (recognisable to anyone
+# coming from a HuggingFace modeling file) and gets resolved to the slot internally.
+_HF_NORM_NAMES_PRE: Mapping[str, str] = MappingProxyType(
+    {
+        "input_norm": "input_layernorm",
+        "pre_ff_norm": "post_attention_layernorm",
+    }
+)
+_HF_NORM_NAMES_SANDWICH: Mapping[str, str] = MappingProxyType(
+    {
+        "input_norm": "input_layernorm",
+        "post_attn_norm": "post_attention_layernorm",
+        "pre_ff_norm": "pre_feedforward_layernorm",
+        "post_ff_norm": "post_feedforward_layernorm",
+    }
 )
 
 _VALID_NORM_TYPES: tuple[str, ...] = ("rmsnorm", "gemma_rmsnorm", "layernorm")
@@ -173,9 +186,9 @@ class NoStateTransformerBlock(nn.Module):
         num_heads: int,
         intermediate_size: int,
         *,
-        # ---- HF naming (required — the divergent ones) ----------------- #
-        norm_hf_names: Mapping[str, str],
-        attn_out_hf_name: str,
+        # ---- HF naming (defaults match Llama / Qwen / Gemma conventions) ---- #
+        norm_hf_names: Mapping[str, str] | None = None,
+        attn_out_hf_name: str = "o_proj",
         # ---- Attention dims --------------------------------------------- #
         num_kv_heads: int | None = None,
         head_dim: int | None = None,
@@ -247,7 +260,11 @@ class NoStateTransformerBlock(nn.Module):
         self.prefix = prefix
         self.rope = rope
 
-        # Naming knobs
+        # Naming knobs. ``norm_hf_names=None`` uses HF defaults for the
+        # chosen topology (covers Llama / Qwen / Gemma / Mistral / Phi3).
+        # When passed, keys are HF default names (``"input_layernorm"``
+        # etc.) so the override dict reads naturally; values are the
+        # actual HF source names in this checkpoint.
         self.attn_out_hf_name = attn_out_hf_name
         self.attn_qkv_hf_names = (
             dict(attn_qkv_hf_names) if attn_qkv_hf_names is not None else None
@@ -300,6 +317,7 @@ class NoStateTransformerBlock(nn.Module):
             bias=attn_bias,
             params_dtype=params_dtype,
             spec=spec_qkv,
+            hf_legs=self.attn_qkv_hf_names,
             mesh=mesh,
             prefix=f"{attn_prefix}.qkv_proj",
         )
@@ -371,6 +389,7 @@ class NoStateTransformerBlock(nn.Module):
             params_dtype=params_dtype,
             spec_in=spec_mlp_in,
             spec_out=spec_mlp_out,
+            gated_hf_legs=self.mlp_gated_hf_names,
             mesh=mesh,
             prefix=mlp_prefix,
         )
@@ -381,24 +400,37 @@ class NoStateTransformerBlock(nn.Module):
 
     @staticmethod
     def _validate_norm_hf_names(
-        names: Mapping[str, str], sandwich: bool
+        overrides: Mapping[str, str] | None, sandwich: bool
     ) -> dict[str, str]:
-        required = _REQUIRED_NORM_KEYS_SANDWICH if sandwich else _REQUIRED_NORM_KEYS_PRE
-        keys = set(names.keys())
-        missing = required - keys
-        extra = keys - required
-        if missing or extra:
+        """Resolve the actual HF source name for each norm slot.
+
+        ``overrides`` is keyed by **HuggingFace default names**
+        (``"input_layernorm"`` etc.) — the same names users see in any
+        HF modeling file. A missing entry uses the HF default itself.
+        ``None`` means use HF defaults for everything (covers Llama /
+        Qwen / Gemma / Mistral / Phi3 — the common case).
+
+        Returns a ``{phyai_slot -> actual_hf_source_name}`` map for
+        internal use by :meth:`_norm_prefix`.
+        """
+        defaults = _HF_NORM_NAMES_SANDWICH if sandwich else _HF_NORM_NAMES_PRE
+        # Start with the identity mapping (use the HF default for every slot).
+        out = dict(defaults)
+        if overrides is None:
+            return out
+        # User keys are HF default names; flip the mapping so we can find the slot.
+        hf_to_slot = {hf_default: slot for slot, hf_default in defaults.items()}
+        unknown = set(overrides) - set(hf_to_slot)
+        if unknown:
             topo = "sandwich-norm" if sandwich else "pre-norm"
-            parts: list[str] = []
-            if missing:
-                parts.append(f"missing keys {sorted(missing)!r}")
-            if extra:
-                parts.append(f"unexpected keys {sorted(extra)!r}")
             raise ValueError(
-                f"norm_hf_names invalid for {topo} topology — "
-                f"{'; '.join(parts)}. Required: {sorted(required)!r}."
+                f"norm_hf_names has unknown keys {sorted(unknown)!r} for "
+                f"{topo} topology; expected subset of "
+                f"{sorted(hf_to_slot.keys())!r}."
             )
-        return dict(names)
+        for hf_default, actual in overrides.items():
+            out[hf_to_slot[hf_default]] = actual
+        return out
 
     def _norm_prefix(self, position: str) -> str:
         own = self._norm_hf_names[position]
@@ -479,33 +511,6 @@ class NoStateTransformerBlock(nn.Module):
         k = k.reshape(*leading, self.kv_heads_local, self.head_dim)
         v = v.reshape(*leading, self.kv_heads_local, self.head_dim)
         return q, k, v
-
-    # ------------------------------------------------------------------ #
-    # Placements                                                         #
-    # ------------------------------------------------------------------ #
-
-    def placements(self) -> list[Placement]:
-        """Concatenate placements from every parameter-bearing child."""
-        out: list[Placement] = []
-        out += self.input_norm.placements()
-        out += self.pre_ff_norm.placements()
-        if self.post_attn_norm is not None:
-            out += self.post_attn_norm.placements()
-        if self.post_ff_norm is not None:
-            out += self.post_ff_norm.placements()
-
-        qkv_kwargs: dict[str, Any] = {}
-        if self.attn_qkv_hf_names is not None:
-            qkv_kwargs["hf_names"] = self.attn_qkv_hf_names
-        out += self.qkv_proj.placements(**qkv_kwargs)
-        if self.q_norm is not None:
-            out += self.q_norm.placements()
-            out += self.k_norm.placements()
-        out += self.o_proj.placements()
-        out += self.mlp.placements(gated_in_names=self.mlp_gated_hf_names)
-        return out
-
-    # ------------------------------------------------------------------ #
 
     def extra_repr(self) -> str:
         s = (

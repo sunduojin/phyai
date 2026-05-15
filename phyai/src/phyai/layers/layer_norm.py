@@ -35,11 +35,7 @@ from typing import Callable, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
-from phyai.layers.placement import (
-    CopyPlacement,
-    Placement,
-    split_prefix,
-)
+from phyai.weights.shards import replicated
 
 _VALID_BACKENDS: tuple[str, ...] = ("flashinfer", "phyai-kernel")
 
@@ -110,17 +106,33 @@ class RMSNorm(nn.Module):
             self._initial_weight(hidden_size, dtype), requires_grad=False
         )
         self._rmsnorm, self._fused_add_rmsnorm = self._load_kernels(self.backend)
+        if prefix:
+            self.weight.hf_keys = [(f"{prefix}.weight", None)]
+            self.weight.weight_loader = replicated()
 
     @staticmethod
     def _load_kernels(backend: str) -> tuple[Callable, Callable]:
         """Return ``(rmsnorm, fused_add_rmsnorm)`` for the chosen backend.
+
+        Both returned callables share the same return contract:
+        ``fused_add_rmsnorm(x, residual, weight, eps) -> (x, residual)``.
+        flashinfer's CUDA op mutates in place and returns ``None``, so we
+        wrap it here once at construction time — the hot path then doesn't
+        have to inspect the return value.
 
         The imports live inside each branch on purpose: picking one backend
         shouldn't drag in the other's package. Subclasses override this to
         swap in a different kernel pair, e.g. Gemma's ``(1 + w)`` variant.
         """
         if backend == "flashinfer":
-            from flashinfer.norm import fused_add_rmsnorm, rmsnorm
+            from flashinfer.norm import (
+                fused_add_rmsnorm as _fi_fused_add_rmsnorm,
+                rmsnorm,
+            )
+
+            def fused_add_rmsnorm(x, residual, weight, eps):
+                _fi_fused_add_rmsnorm(x, residual, weight, eps)
+                return x, residual
 
             return rmsnorm, fused_add_rmsnorm
         from phyai_kernel import fused_add_rmsnorm, rmsnorm
@@ -138,15 +150,12 @@ class RMSNorm(nn.Module):
         residual: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
         if residual is not None:
-            # Fused add then norm, in place. flashinfer mutates and returns
-            # ``None``; phyai-kernel hands back the ``(x, residual)`` pair.
-            # Collapse both into one return shape so callers don't care.
-            ret = self._fused_add_rmsnorm(
+            # Fused add then norm, in place. Both backends return the
+            # ``(x, residual)`` pair — flashinfer's None-return is wrapped at
+            # construction time inside :meth:`_load_kernels`.
+            return self._fused_add_rmsnorm(
                 x, residual, self.weight.data, self.variance_epsilon
             )
-            if ret is None:
-                return x, residual
-            return ret
 
         needs_reshape = x.dim() != 2
         if needs_reshape:
@@ -161,16 +170,6 @@ class RMSNorm(nn.Module):
         return (
             f"{self.hidden_size}, eps={self.variance_epsilon}, backend={self.backend!r}"
         )
-
-    def placements(self) -> list[Placement]:
-        parent, own = split_prefix(self.prefix)
-        hf_base = f"{parent}.{own}" if parent else own
-        return [
-            CopyPlacement(
-                hf_key=f"{hf_base}.weight",
-                phyai_key=f"{self.prefix}.weight",
-            )
-        ]
 
 
 class GemmaRMSNorm(RMSNorm):
@@ -276,14 +275,26 @@ class LayerNorm(nn.Module):
             self.register_parameter("bias", None)
 
         self._layernorm = self._load_kernel(self.backend)
-        # flashinfer always reads ``beta``. With ``bias=False`` we still need a
-        # zero buffer to feed the kernel — kept in fp32 to match the contract.
-        if self.backend == "flashinfer" and not bias:
-            self.register_buffer(
-                "_zero_beta",
-                torch.zeros(hidden_size, dtype=torch.float32),
-                persistent=False,
+        # Pre-bind the no-bias placeholder for ``beta`` so forward doesn't
+        # branch on backend:
+        # * flashinfer always reads ``beta`` — feed an fp32 zero buffer so
+        #   the kernel's add becomes a no-op;
+        # * phyai-kernel accepts ``bias=None`` directly — register ``None``
+        #   so the same attribute access works on the hot path.
+        if not bias:
+            zero_beta = (
+                torch.zeros(hidden_size, dtype=torch.float32)
+                if self.backend == "flashinfer"
+                else None
             )
+            self.register_buffer("_zero_beta", zero_beta, persistent=False)
+
+        if prefix:
+            self.weight.hf_keys = [(f"{prefix}.weight", None)]
+            self.weight.weight_loader = replicated()
+            if bias:
+                self.bias.hf_keys = [(f"{prefix}.bias", None)]
+                self.bias.weight_loader = replicated()
 
     @staticmethod
     def _load_kernel(backend: str) -> Callable:
@@ -301,16 +312,11 @@ class LayerNorm(nn.Module):
             orig_shape = x.shape
             x = x.contiguous().reshape(-1, orig_shape[-1])
 
-        if self.backend == "flashinfer":
-            # gamma / beta are pre-allocated in fp32 (see __init__) — hand the
-            # buffers to the CUDA kernel directly, no per-forward cast.
-            beta = self.bias.data if self.has_bias else self._zero_beta
-            out = self._layernorm(x, self.weight.data, beta, self.variance_epsilon)
-        else:
-            # Triton kernel handles any dtype on weight/bias and accepts
-            # ``bias=None`` directly — pass weight/bias.data through.
-            bias_data = self.bias.data if self.has_bias else None
-            out = self._layernorm(x, self.weight.data, bias_data, self.variance_epsilon)
+        # ``beta`` is pre-resolved at construction time:
+        # * has_bias=True  → bias.data (resolved per-call so weight loading is reflected)
+        # * has_bias=False → ``_zero_beta`` (fp32 zeros for flashinfer; ``None`` for phyai-kernel)
+        beta = self.bias.data if self.has_bias else self._zero_beta
+        out = self._layernorm(x, self.weight.data, beta, self.variance_epsilon)
 
         if needs_reshape:
             out = out.reshape(orig_shape)
@@ -321,24 +327,6 @@ class LayerNorm(nn.Module):
             f"{self.hidden_size}, eps={self.variance_epsilon}, "
             f"bias={self.has_bias}, backend={self.backend!r}"
         )
-
-    def placements(self) -> list[Placement]:
-        parent, own = split_prefix(self.prefix)
-        hf_base = f"{parent}.{own}" if parent else own
-        out: list[Placement] = [
-            CopyPlacement(
-                hf_key=f"{hf_base}.weight",
-                phyai_key=f"{self.prefix}.weight",
-            )
-        ]
-        if self.has_bias:
-            out.append(
-                CopyPlacement(
-                    hf_key=f"{hf_base}.bias",
-                    phyai_key=f"{self.prefix}.bias",
-                )
-            )
-        return out
 
 
 # --------------------------------------------------------------------------- #
@@ -472,14 +460,23 @@ class AdaRMSNorm(nn.Module):
 
         self._adarms_kernel = self._load_kernel(self.backend)
 
+        if prefix:
+            # AdaRMSNorm hides its inner ``nn.Linear``; we attach loaders
+            # directly onto its weight/bias so the generic loader sees them.
+            self.dense.weight.hf_keys = [(f"{prefix}.dense.weight", None)]
+            self.dense.weight.weight_loader = replicated()
+            self.dense.bias.hf_keys = [(f"{prefix}.dense.bias", None)]
+            self.dense.bias.weight_loader = replicated()
+
     @staticmethod
-    def _load_kernel(backend: str) -> Optional[Callable]:
+    def _load_kernel(backend: str) -> Callable:
         if backend == "phyai-kernel":
             from phyai_kernel import adarmsnorm
 
             return adarmsnorm
-        # Torch backend uses :func:`_torch_adarmsnorm` inline.
-        return None
+        # ``"torch"`` backend: eager fp32 reference, signature-compatible with
+        # the Triton kernel so forward can dispatch through one indirection.
+        return _torch_adarmsnorm
 
     def forward(
         self,
@@ -504,29 +501,13 @@ class AdaRMSNorm(nn.Module):
         if x.dim() == 3 and modulation.dim() == 2:
             modulation = modulation.unsqueeze(1)
 
-        if self.backend == "phyai-kernel":
-            return self._adarms_kernel(x, modulation, self.variance_epsilon)
-        return _torch_adarmsnorm(x, modulation, self.variance_epsilon)
+        return self._adarms_kernel(x, modulation, self.variance_epsilon)
 
     def extra_repr(self) -> str:
         return (
             f"{self.hidden_size}, cond_dim={self.cond_dim}, "
             f"eps={self.variance_epsilon}, backend={self.backend!r}"
         )
-
-    def placements(self) -> list[Placement]:
-        parent, own = split_prefix(self.prefix)
-        hf_base = f"{parent}.{own}" if parent else own
-        return [
-            CopyPlacement(
-                hf_key=f"{hf_base}.dense.weight",
-                phyai_key=f"{self.prefix}.dense.weight",
-            ),
-            CopyPlacement(
-                hf_key=f"{hf_base}.dense.bias",
-                phyai_key=f"{self.prefix}.dense.bias",
-            ),
-        ]
 
 
 __all__ = ["AdaRMSNorm", "GemmaRMSNorm", "LayerNorm", "RMSNorm"]
