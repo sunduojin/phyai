@@ -1,4 +1,4 @@
-"""Top-level safetensors → model loader.
+"""Top-level safetensors -> model loader.
 
 The whole load chain in one place:
 
@@ -13,7 +13,7 @@ The whole load chain in one place:
    :class:`LoadReport`. Strict mode raises if anything required is
    missing or any HF key was unexpected.
 4. Walk ``model.modules()``; call ``module.post_load()`` where defined
-   so quant specs can do scale fixups (e.g. fp8 per-tensor →
+   so quant specs can do scale fixups (e.g. fp8 per-tensor ->
    per-channel fan-out).
 """
 

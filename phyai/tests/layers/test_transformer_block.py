@@ -1,4 +1,4 @@
-"""NoStateTransformerBlock — five canonical configs + naming validation + HF-key mapping.
+"""TransformerBlock — five canonical configs + naming validation + HF-key mapping.
 
 Llama / Qwen / Gemma / Mistral / Phi3 / Olmo all use HF-default norm
 names (``input_layernorm`` / ``post_attention_layernorm`` /
@@ -18,7 +18,7 @@ import torch
 
 import phyai.layers.linear as L
 from phyai.layers import RotaryEmbedding
-from phyai.layers.transformer_block import NoStateTransformerBlock
+from phyai.layers.transformer_block import TransformerBlock
 from phyai.parallel.mesh import Mesh
 from phyai.parallel.state import _meshes, register_mesh
 
@@ -97,7 +97,7 @@ def test_unknown_norm_type_raises(fake_mesh):
     fake_mesh()
     _init_dispatcher()
     with pytest.raises(ValueError, match="Unknown norm_type"):
-        NoStateTransformerBlock(
+        TransformerBlock(
             hidden_size=64,
             num_heads=4,
             intermediate_size=128,
@@ -109,7 +109,7 @@ def test_hidden_size_not_divisible_by_heads_raises(fake_mesh):
     fake_mesh()
     _init_dispatcher()
     with pytest.raises(ValueError, match="not divisible"):
-        NoStateTransformerBlock(
+        TransformerBlock(
             hidden_size=65,
             num_heads=4,
             intermediate_size=128,
@@ -118,10 +118,10 @@ def test_hidden_size_not_divisible_by_heads_raises(fake_mesh):
 
 
 def test_default_pre_norm_uses_hf_defaults(fake_mesh):
-    """No norm_hf_names passed → block uses HF defaults."""
+    """No norm_hf_names passed -> block uses HF defaults."""
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -139,7 +139,7 @@ def test_default_pre_norm_uses_hf_defaults(fake_mesh):
 def test_default_sandwich_norm_uses_hf_defaults(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -164,7 +164,7 @@ def test_norm_hf_names_unknown_key_raises(fake_mesh):
     # Old phyai-internal slot names ("input_norm" etc.) are no longer
     # accepted — the new API expects HF default names as keys.
     with pytest.raises(ValueError, match="unknown keys"):
-        NoStateTransformerBlock(
+        TransformerBlock(
             hidden_size=64,
             num_heads=4,
             intermediate_size=128,
@@ -177,7 +177,7 @@ def test_norm_hf_names_pre_norm_rejects_sandwich_only_keys(fake_mesh):
     _init_dispatcher()
     # pre_feedforward_layernorm only exists in the sandwich-norm topology.
     with pytest.raises(ValueError, match="unknown keys"):
-        NoStateTransformerBlock(
+        TransformerBlock(
             hidden_size=64,
             num_heads=4,
             intermediate_size=128,
@@ -188,7 +188,7 @@ def test_norm_hf_names_pre_norm_rejects_sandwich_only_keys(fake_mesh):
 def test_explicit_head_dim_takes_priority(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -202,7 +202,7 @@ def test_explicit_head_dim_takes_priority(fake_mesh):
 def test_pre_norm_has_two_norms_only(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -211,14 +211,14 @@ def test_pre_norm_has_two_norms_only(fake_mesh):
     )
     assert blk.input_norm is not None
     assert blk.pre_ff_norm is not None
-    assert blk.post_attn_norm is None
-    assert blk.post_ff_norm is None
+    assert isinstance(blk.post_attn_norm, torch.nn.Identity)
+    assert isinstance(blk.post_ff_norm, torch.nn.Identity)
 
 
 def test_sandwich_norm_has_four_norms(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -233,20 +233,20 @@ def test_sandwich_norm_has_four_norms(fake_mesh):
 def test_qk_norm_default_off(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
         **_base_kwargs(),
     )
-    assert blk.q_norm is None
-    assert blk.k_norm is None
+    assert isinstance(blk.q_norm, torch.nn.Identity)
+    assert isinstance(blk.k_norm, torch.nn.Identity)
 
 
 def test_qk_norm_present_when_enabled(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         head_dim=16,
@@ -261,11 +261,11 @@ def test_qk_norm_present_when_enabled(fake_mesh):
     assert blk.k_norm.weight.shape == (16,)
 
 
-def test_rope_required_when_position_ids_missing(fake_mesh):
+def test_rope_required_when_positions_missing(fake_mesh):
     fake_mesh()
     _init_dispatcher()
     rope = RotaryEmbedding(16, max_position_embeddings=64, backend="eager")
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -276,14 +276,14 @@ def test_rope_required_when_position_ids_missing(fake_mesh):
         **_base_kwargs(),
     )
     x = torch.randn(2, 8, 64)
-    with pytest.raises(ValueError, match="position_ids"):
+    with pytest.raises(ValueError, match="positions"):
         blk(x)
 
 
 def test_wrong_input_rank_raises(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -300,7 +300,7 @@ def test_wrong_input_rank_raises(fake_mesh):
 def test_wrong_hidden_size_raises(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         intermediate_size=128,
@@ -327,7 +327,7 @@ def test_gemma1_style_forward(fake_mesh):
     H, num_heads, kv_heads, head_dim, I = 64, 4, 2, 16, 128
 
     rope = RotaryEmbedding(head_dim, max_position_embeddings=128, backend="eager")
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=H,
         num_heads=num_heads,
         num_kv_heads=kv_heads,
@@ -346,7 +346,7 @@ def test_gemma1_style_forward(fake_mesh):
 
     x = (torch.randn(2, 16, H) * 0.05).to(torch.bfloat16).cuda()
     pos = torch.arange(16, device="cuda")
-    y = blk(x, position_ids=pos)
+    y = blk(x, positions=pos)
     assert y.shape == (2, 16, H)
     assert y.dtype == torch.bfloat16
 
@@ -359,7 +359,7 @@ def test_gemma2_style_sandwich_forward(fake_mesh):
     H, num_heads, kv_heads, head_dim, I = 64, 4, 2, 16, 128
 
     rope = RotaryEmbedding(head_dim, max_position_embeddings=128, backend="eager")
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=H,
         num_heads=num_heads,
         num_kv_heads=kv_heads,
@@ -381,7 +381,7 @@ def test_gemma2_style_sandwich_forward(fake_mesh):
 
     x = (torch.randn(1, 12, H) * 0.05).to(torch.bfloat16).cuda()
     pos = torch.arange(12, device="cuda")
-    y = blk(x, position_ids=pos)
+    y = blk(x, positions=pos)
     assert y.shape == (1, 12, H)
 
 
@@ -393,7 +393,7 @@ def test_gemma3_style_sandwich_qk_norm_forward(fake_mesh):
     H, num_heads, kv_heads, head_dim, I = 64, 4, 2, 16, 128
 
     rope = RotaryEmbedding(head_dim, max_position_embeddings=128, backend="eager")
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=H,
         num_heads=num_heads,
         num_kv_heads=kv_heads,
@@ -415,7 +415,7 @@ def test_gemma3_style_sandwich_qk_norm_forward(fake_mesh):
 
     x = (torch.randn(1, 12, H) * 0.05).to(torch.bfloat16).cuda()
     pos = torch.arange(12, device="cuda")
-    y = blk(x, position_ids=pos)
+    y = blk(x, positions=pos)
     assert y.shape == (1, 12, H)
 
 
@@ -427,7 +427,7 @@ def test_qwen2_style_forward(fake_mesh):
     H, num_heads, kv_heads, head_dim, I = 64, 4, 2, 16, 128
 
     rope = RotaryEmbedding(head_dim, max_position_embeddings=128, backend="eager")
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=H,
         num_heads=num_heads,
         num_kv_heads=kv_heads,
@@ -452,7 +452,7 @@ def test_qwen2_style_forward(fake_mesh):
 
     x = (torch.randn(2, 16, H) * 0.05).to(torch.bfloat16).cuda()
     pos = torch.arange(16, device="cuda")
-    y = blk(x, position_ids=pos)
+    y = blk(x, positions=pos)
     assert y.shape == (2, 16, H)
 
 
@@ -464,7 +464,7 @@ def test_qwen3_style_forward(fake_mesh):
     H, num_heads, kv_heads, head_dim, I = 64, 4, 2, 16, 128
 
     rope = RotaryEmbedding(head_dim, max_position_embeddings=128, backend="eager")
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=H,
         num_heads=num_heads,
         num_kv_heads=kv_heads,
@@ -490,7 +490,7 @@ def test_qwen3_style_forward(fake_mesh):
 
     x = (torch.randn(2, 16, H) * 0.05).to(torch.bfloat16).cuda()
     pos = torch.arange(16, device="cuda")
-    y = blk(x, position_ids=pos)
+    y = blk(x, positions=pos)
     assert y.shape == (2, 16, H)
 
 
@@ -501,7 +501,7 @@ def test_siglip_style_forward(fake_mesh):
     _init_dispatcher()
     H, num_heads, head_dim, I = 96, 4, 24, 256
 
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=H,
         num_heads=num_heads,
         head_dim=head_dim,
@@ -535,7 +535,7 @@ def test_ragged_forward(fake_mesh):
     H, num_heads, head_dim, I = 64, 4, 16, 128
 
     rope = RotaryEmbedding(head_dim, max_position_embeddings=64, backend="eager")
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=H,
         num_heads=num_heads,
         head_dim=head_dim,
@@ -552,7 +552,7 @@ def test_ragged_forward(fake_mesh):
     x = (torch.randn(nnz, H) * 0.05).to(torch.bfloat16).cuda()
     pos = torch.cat([torch.arange(12), torch.arange(12)]).to("cuda")
     cu = torch.tensor([0, 12, 24], dtype=torch.int32, device="cuda")
-    y = blk(x, position_ids=pos, cu_seqlens_q=cu)
+    y = blk(x, positions=pos, cu_seqlens_q=cu)
     assert y.shape == (nnz, H)
 
 
@@ -561,7 +561,7 @@ def test_ragged_forward(fake_mesh):
 # ---------------------------------------------------------------------------
 
 
-def _hf_keys(blk: NoStateTransformerBlock) -> set[str]:
+def _hf_keys(blk: TransformerBlock) -> set[str]:
     """Collect every HF source key declared by any parameter in `blk`."""
     keys: set[str] = set()
     for _, p in blk.named_parameters():
@@ -574,7 +574,7 @@ def test_pre_norm_hf_keys_llama_like(fake_mesh):
     """Llama / Gemma1 / Qwen2 / Mistral convention."""
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         head_dim=16,
@@ -605,7 +605,7 @@ def test_qwen2_hf_keys_with_qkv_bias(fake_mesh):
     """Qwen2: Q/K/V bias should appear as separate keys, O has no bias."""
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         head_dim=16,
@@ -627,7 +627,7 @@ def test_qwen3_hf_keys_qk_norm(fake_mesh):
     """Qwen3: pre-norm + q_norm / k_norm HF keys."""
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         head_dim=16,
@@ -646,7 +646,7 @@ def test_gemma2_hf_keys_sandwich(fake_mesh):
     """Gemma2: 4 sandwich norms, no q_norm / k_norm."""
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         head_dim=16,
@@ -668,7 +668,7 @@ def test_gemma3_hf_keys_sandwich_qk_norm(fake_mesh):
     """Gemma3: sandwich + q_norm / k_norm."""
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         head_dim=16,
@@ -692,7 +692,7 @@ def test_siglip_hf_keys(fake_mesh):
     """SigLIP: layer_norm{1,2} + out_proj + fc1/fc2 + bias on q/k/v/o/fc/norm."""
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=96,
         num_heads=4,
         head_dim=24,
@@ -735,7 +735,7 @@ def test_siglip_hf_keys(fake_mesh):
 def test_extra_repr_contains_key_fields(fake_mesh):
     fake_mesh()
     _init_dispatcher()
-    blk = NoStateTransformerBlock(
+    blk = TransformerBlock(
         hidden_size=64,
         num_heads=4,
         head_dim=16,

@@ -26,6 +26,12 @@ from dataclasses import dataclass
 import torch
 
 from phyai.cache import KVCachePool, StaticCache
+from phyai.layers.attention import (
+    ARAttnMetadata,
+    AttnLayout,
+    AttnMode,
+    DiffusionAttnMetadata,
+)
 from phyai.models.pi05.configuration_pi05 import PI05Config
 from phyai.models.pi05.model_runner_pi05 import (
     PI05ExpertRunner,
@@ -57,8 +63,8 @@ class PI05Request:
     """One pi0.5 inference request.
 
     ``pixel_values`` carries every robot's three cameras stacked along
-    the camera axis: shape ``(B, 3, 3, H, W)`` — ``B`` robots × 3 cameras
-    × 3 channels × ``image_size``×``image_size``.
+    the camera axis: shape ``(B, 3, 3, H, W)`` — ``B`` robots x 3 cameras
+    x 3 channels x ``image_size``x``image_size``.
 
     ``input_ids`` is the padded language-token tensor (``(B,
     tokenizer_max_length)`` int64); ``lang_lens`` carries the
@@ -200,7 +206,7 @@ class PI05SingleBatchScheduler(Scheduler):
 
         # Precompute the time-embedding table for the linear flow-matching
         # schedule ``t = 1.0 + step * (-1/N)``. ``embed_time`` is the full
-        # MLP (sinusoidal → Linear → SiLU → Linear → SiLU); its output
+        # MLP (sinusoidal -> Linear -> SiLU -> Linear -> SiLU); its output
         # depends only on the time scalar and the time-MLP weights, both
         # fixed across inferences, so a one-time precompute eliminates
         # the matmuls from every Euler step's captured graph.
@@ -236,7 +242,7 @@ class PI05SingleBatchScheduler(Scheduler):
         vision_out = self.vision_runner.forward(
             VisionForwardBatch(pixel_values=pixel_values[0])
         )
-        # (3, num_patches, projection_dim) → (1, image_token_count, hidden_size)
+        # (3, num_patches, projection_dim) -> (1, image_token_count, hidden_size)
         image_embs = vision_out.flatten(0, 1).unsqueeze(0)
 
         # 2. Lang embed (eager) + per-sample padded packing.
@@ -288,12 +294,19 @@ class PI05SingleBatchScheduler(Scheduler):
         )
 
         # Plan the LLM runner's wrapper / sdpa metadata buffers.
-        self.llm_runner.plan_inference(
+        prefix_meta = ARAttnMetadata(
+            mode=AttnMode.PREFILL,
+            layout=AttnLayout.RAGGED_3D,
+            batch_size=self.batch_size,
+            num_query_tokens=self.batch_size * self.n_per_sample,
             cu_seqlens_q=cu_q_prefix,
             paged_kv_indptr=paged_kv_indptr_prefix,
             paged_kv_indices=paged_kv_indices_prefix,
             paged_kv_last_page_len=paged_kv_last_prefix,
+            write_indices=write_indices,
+            position_ids=position_ids,
         )
+        self.llm_runner.plan_inference(prefix_meta)
 
         # 4. Prefix forward — populates the cache pool. ``packed`` is a
         # fresh contiguous tensor; the runner's ``replay`` will copy it
@@ -310,6 +323,13 @@ class PI05SingleBatchScheduler(Scheduler):
 
         # 5. Plan the expert runner's joint-attention metadata.
         pos_ids_suffix = build_suffix_pos_ids(real_lens, cfg.chunk_size)
+        cu_q_suffix = torch.arange(
+            0,
+            (self.batch_size + 1) * cfg.chunk_size,
+            cfg.chunk_size,
+            dtype=torch.int32,
+            device=device,
+        )
         paged_kv_indptr_full = torch.zeros(
             self.batch_size + 1, dtype=torch.int32, device=device
         )
@@ -321,12 +341,18 @@ class PI05SingleBatchScheduler(Scheduler):
             suffix_slot_base=self.suffix_base,
         )
         paged_kv_last_full = build_joint_last_page_len(real_lens, cfg.chunk_size)
-        self.expert_runner.plan_inference(
-            pos_ids_suffix=pos_ids_suffix,
+        joint_meta = DiffusionAttnMetadata(
+            mode=AttnMode.PREFILL,
+            layout=AttnLayout.RAGGED_3D,
+            batch_size=self.batch_size,
+            num_query_tokens=self.batch_size * cfg.chunk_size,
+            cu_seqlens_q=cu_q_suffix,
             paged_kv_indptr=paged_kv_indptr_full,
             paged_kv_indices=paged_kv_indices_full,
             paged_kv_last_page_len=paged_kv_last_full,
+            position_ids=pos_ids_suffix,
         )
+        self.expert_runner.plan_inference(joint_meta)
 
         # 6. Sample noise (or use the user's) and run 10-step Euler.
         if request.noise is None:

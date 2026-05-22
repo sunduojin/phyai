@@ -42,6 +42,16 @@ from phyai.weights.shards import replicated
 _VALID_BACKENDS: tuple[str, ...] = ("flashinfer", "phyai-kernel")
 
 
+def list_norm_backends() -> list[str]:
+    """Return every registered :class:`RMSNorm` / :class:`LayerNorm` backend name.
+
+    The list is what :class:`~phyai.engine_config.BackendConfig` validates
+    against; ``AdaRMSNorm`` has its own narrower set, exposed via
+    :func:`list_adarms_backends`.
+    """
+    return list(_VALID_BACKENDS)
+
+
 def _resolve_backend(name: str) -> str:
     canonical = name.replace("_", "-").lower()
     if canonical not in _VALID_BACKENDS:
@@ -106,7 +116,7 @@ class RMSNorm(nn.Module):
         self.variance_epsilon = eps
         self.prefix = prefix
         if device is None:
-            device = get_engine_config().device
+            device = get_engine_config().device.target
         self.weight = nn.Parameter(
             self._initial_weight(hidden_size, dtype, device), requires_grad=False
         )
@@ -273,7 +283,7 @@ class LayerNorm(nn.Module):
         self.has_bias = bias
         self.prefix = prefix
         if device is None:
-            device = get_engine_config().device
+            device = get_engine_config().device.target
 
         # flashinfer's CUDA layernorm hard-requires fp32 gamma/beta. Pre-allocate
         # in fp32 once so the hot path skips the per-forward cast. phyai-kernel's
@@ -331,8 +341,8 @@ class LayerNorm(nn.Module):
             x = x.contiguous().reshape(-1, orig_shape[-1])
 
         # ``beta`` is pre-resolved at construction time:
-        # * has_bias=True  → bias.data (resolved per-call so weight loading is reflected)
-        # * has_bias=False → ``_zero_beta`` (fp32 zeros for flashinfer; ``None`` for phyai-kernel)
+        # * has_bias=True  -> bias.data (resolved per-call so weight loading is reflected)
+        # * has_bias=False -> ``_zero_beta`` (fp32 zeros for flashinfer; ``None`` for phyai-kernel)
         beta = self.bias.data if self.has_bias else self._zero_beta
         out = self._layernorm(x, self.weight.data, beta, self.variance_epsilon)
 
@@ -353,6 +363,11 @@ class LayerNorm(nn.Module):
 
 
 _ADARMS_BACKENDS: tuple[str, ...] = ("phyai-kernel", "torch")
+
+
+def list_adarms_backends() -> list[str]:
+    """Return every registered :class:`AdaRMSNorm` backend name."""
+    return list(_ADARMS_BACKENDS)
 
 
 def _resolve_adarms_backend(name: str) -> str:
@@ -471,7 +486,7 @@ class AdaRMSNorm(nn.Module):
         self.variance_epsilon = eps
         self.prefix = prefix
         if device is None:
-            device = get_engine_config().device
+            device = get_engine_config().device.target
 
         # ReplicatedLinear allocates ``weight`` empty (Bf16Spec) and ``bias``
         # zero; we then zero the weight as well so a freshly constructed

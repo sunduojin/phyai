@@ -63,12 +63,14 @@ class LinearBase(nn.Module):
         self.params_dtype = params_dtype or torch.get_default_dtype()
         self.skip_bias_add = skip_bias_add
         self.spec = spec if spec is not None else Bf16Spec()
-        self.device = device if device is not None else get_engine_config().device
+        self.device = (
+            device if device is not None else get_engine_config().device.target
+        )
         self.prefix = prefix
         self._bias_requested = bias
 
     def post_load(self) -> None:
-        """Spec-driven post-load fixup (e.g. fp8 per-tensor → per-channel)."""
+        """Spec-driven post-load fixup (e.g. fp8 per-tensor -> per-channel)."""
         proc = getattr(self.spec, "process_after_loading", None)
         if callable(proc):
             proc(self)

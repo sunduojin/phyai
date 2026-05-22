@@ -49,7 +49,7 @@ def encode_text_atoms_int32(token_ids: Sequence[int]) -> bytes:
 
 
 def encode_eagle_bigram_atoms(token_ids: Sequence[int]) -> bytes:
-    """Sliding bigram encoding: N tokens → N-1 atoms of 8 bytes each.
+    """Sliding bigram encoding: N tokens -> N-1 atoms of 8 bytes each.
 
     Each atom packs ``(curr_token, next_token)`` as a little-endian int32 pair.
     """

@@ -118,7 +118,9 @@ class VocabParallelEmbedding(nn.Module):
 
         self.params_dtype = params_dtype or torch.get_default_dtype()
         self.spec = spec if spec is not None else Bf16Spec()
-        self.device = device if device is not None else get_engine_config().device
+        self.device = (
+            device if device is not None else get_engine_config().device.target
+        )
         self.prefix = prefix
         self.embed_scale = float(embed_scale)
         # Only allocate a buffer when scale is non-trivial; the forward
@@ -246,7 +248,9 @@ class ParallelLMHead(nn.Module):
 
         self.params_dtype = params_dtype or torch.get_default_dtype()
         self.spec = spec if spec is not None else Bf16Spec()
-        self.device = device if device is not None else get_engine_config().device
+        self.device = (
+            device if device is not None else get_engine_config().device.target
+        )
         self.prefix = prefix
 
         mesh_obj = resolve_mesh(mesh)

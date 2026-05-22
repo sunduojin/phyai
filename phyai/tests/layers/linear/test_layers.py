@@ -240,7 +240,7 @@ def test_qkv_linear_no_gqa_shapes(fake_mesh):
 
 
 def test_qkv_linear_gqa_replicates_kv(fake_mesh):
-    """tp_size=4 with 2 KV heads → each rank gets the whole KV replicated twice."""
+    """tp_size=4 with 2 KV heads -> each rank gets the whole KV replicated twice."""
     fake_mesh(sizes={"tp": 4})
     _init_default_dispatcher()
     layer = L.QKVParallelLinear(
@@ -333,11 +333,11 @@ def test_qkv_gqa_replica_share_kv_slot(fake_mesh):
     # Build a fake K source with row patterns we can identify after sharding.
     # effective_kv_heads = 4 (tp_size), kv_size_global = 4*8 = 32 rows total.
     # Per-rank kv_local = 32 / 4 = 8 rows.
-    # num_kv_replicas = 4//2 = 2 → kv_world = 4/2 = 2 → kv_per_slot = 32/2 = 16.
-    # rank 0/1 → slot 0 → rows 0..16 (each takes 8 of those 16).
+    # num_kv_replicas = 4//2 = 2 -> kv_world = 4/2 = 2 -> kv_per_slot = 32/2 = 16.
+    # rank 0/1 -> slot 0 -> rows 0..16 (each takes 8 of those 16).
     # Wait, the loader narrow uses size=kv_local=8 but rank=tp_rank//2.
-    # rank0/1: slot=0, narrow(0, 0*8, 8) → rows 0..8.
-    # rank2/3: slot=1, narrow(0, 1*8, 8) → rows 8..16.
+    # rank0/1: slot=0, narrow(0, 0*8, 8) -> rows 0..8.
+    # rank2/3: slot=1, narrow(0, 1*8, 8) -> rows 8..16.
     # So both ranks at slot 0 read the SAME rows 0..8.
     layer_r0 = L.QKVParallelLinear(
         hidden_size=32,
@@ -367,7 +367,7 @@ def test_qkv_gqa_replica_share_kv_slot(fake_mesh):
     )
     layer_r1.weight.weight_loader(layer_r1.weight, disk_k, "k")
     k_at_r1 = layer_r1.weight.data.narrow(0, 16, 8).clone()
-    # Ranks 0 and 1 share slot 0 → same K rows.
+    # Ranks 0 and 1 share slot 0 -> same K rows.
     torch.testing.assert_close(k_at_r0, k_at_r1)
 
     fake_mesh(sizes={"tp": 4}, ranks={"tp": 2})
@@ -383,7 +383,7 @@ def test_qkv_gqa_replica_share_kv_slot(fake_mesh):
     )
     layer_r2.weight.weight_loader(layer_r2.weight, disk_k, "k")
     k_at_r2 = layer_r2.weight.data.narrow(0, 16, 8).clone()
-    # Rank 2 → slot 1 → DIFFERENT rows from rank 0/1.
+    # Rank 2 -> slot 1 -> DIFFERENT rows from rank 0/1.
     assert not torch.equal(k_at_r0, k_at_r2)
 
 
@@ -445,7 +445,7 @@ def test_empty_prefix_skips_attach(fake_mesh):
     fake_mesh()
     _init_default_dispatcher()
     layer = L.ReplicatedLinear(in_features=4, out_features=8, prefix="")
-    # No prefix → no hf_keys attached → loader skips this param.
+    # No prefix -> no hf_keys attached -> loader skips this param.
     assert not hasattr(layer.weight, "hf_keys")
 
 
@@ -474,7 +474,7 @@ def test_init_force_env_overrides(fake_mesh, monkeypatch):
     monkeypatch.setenv("PHYAI_FORCE_LINEAR_KERNEL", "torch")
     fake_mesh()
     d = L.init(register_flashinfer=True, validate=False)
-    # Even if flashinfer preferred for bf16 prefill, force→torch.
+    # Even if flashinfer preferred for bf16 prefill, force->torch.
     k = d.select(
         spec_id="bf16",
         M=1024,

@@ -16,16 +16,26 @@ Lifecycle (driven by the scheduler):
    implementation is a no-op. Subclasses override when they need to
    spin up extra resources after :meth:`setup` (e.g. the flashinfer
    workspace).
-4. ``forward`` — the hot path. Receives a forward-batch payload;
+4. ``plan_inference`` — eager metadata staging hook. Called by the
+   scheduler outside any captured region with the per-stack metadata
+   describing the next forward step (``ARAttnMetadata`` /
+   ``DiffusionAttnMetadata`` / ``AttnMetadata`` depending on which
+   attention stack the runner drives). Runners forward this to their
+   backend's ``replay_metadata`` (graph mode) or
+   ``init_forward_metadata`` (eager mode). Default: no-op for runners
+   without attention (e.g. the vision tower).
+5. ``forward`` — the hot path. Receives a forward-batch payload;
    returns the runner's output (depends on the runner type — vision
    returns image embeddings, LLM returns nothing, expert returns
    ``v_t``).
-5. ``close`` — release the captured graphs and any GPU memory the
+6. ``close`` — release the captured graphs and any GPU memory the
    runner pinned. Optional; the default implementation is a no-op.
 
 The base class deliberately does not enforce a payload type — different
 runners consume different forward-batch flavors and the type lives in
-the subclass signature, not on the base.
+the subclass signature, not on the base. Same applies to ``meta`` —
+each concrete runner annotates its ``plan_inference`` with the
+matching metadata type.
 """
 
 from __future__ import annotations
@@ -48,6 +58,22 @@ class ModelRunner(abc.ABC):
 
     def warmup(self) -> None:
         """Optional post-setup warmup. Default: no-op."""
+        return None
+
+    def plan_inference(self, meta: Any) -> None:
+        """Stage attention metadata for the next :meth:`forward` call.
+
+        Called by the scheduler OUTSIDE any captured region. Runners
+        with a paged-attention backend forward this to either
+        ``replay_metadata`` (graph mode) or ``init_forward_metadata``
+        (eager mode) on the runner's backend instance. The concrete
+        runner's signature narrows ``meta`` to its per-stack metadata
+        type (``ARAttnMetadata`` / ``DiffusionAttnMetadata`` / etc.).
+
+        Default: no-op. Runners that don't drive attention (e.g.
+        vision tower) inherit the no-op directly.
+        """
+        del meta
         return None
 
     @abc.abstractmethod

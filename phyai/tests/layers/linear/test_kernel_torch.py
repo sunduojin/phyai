@@ -88,7 +88,7 @@ def test_torch_can_handle_fp8_needs_sm89():
 
 def test_torch_can_handle_fp8_rejects_unaligned_K():
     k = TorchKernel()
-    # K=15 not divisible by 16 → reject fp8
+    # K=15 not divisible by 16 -> reject fp8
     assert not k.can_handle(_probe("fp8_per_tensor", N=16, K=15, sm=90))
     assert k.can_handle(_probe("fp8_per_tensor", N=16, K=16, sm=90))
 

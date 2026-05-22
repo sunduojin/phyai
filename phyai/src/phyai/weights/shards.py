@@ -89,7 +89,7 @@ class _Leg:
 def fused(*, fuse_dim: int, legs: dict, mesh: Mesh) -> WeightLoader:
     """Multi-source fused-param loader.
 
-    ``legs`` maps ``shard_id`` → :class:`_Leg`. The loader looks up the
+    ``legs`` maps ``shard_id`` -> :class:`_Leg`. The loader looks up the
     leg by ``shard_id`` (received from the param's ``hf_keys`` entry),
     TP-shards the source, and writes into the destination's ``fuse_dim``
     slot at ``[offset, offset+size)``.

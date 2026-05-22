@@ -73,7 +73,7 @@ class MultiPatternCache:
 
 
 class NestedCache:
-    """Generic key→cache router that accepts any cache-like value (PrefixCache,
+    """Generic key->cache router that accepts any cache-like value (PrefixCache,
     HybridCache, PairedCache, MultiPatternCache).
 
     Used to compose layered routing such as

@@ -173,7 +173,7 @@ def test_vocab_loader_pathological_all_padding_rank(fake_mesh):
     V, V_padded, D, tp = 20, 128, 4, 4
     disk = torch.randn(V, D, dtype=torch.float32)
     per_rank = V_padded // tp  # 32
-    # Rank 1: shard_start=32 > V=20 → entirely padding.
+    # Rank 1: shard_start=32 > V=20 -> entirely padding.
     fake_mesh(sizes={"tp": tp}, ranks={"tp": 1})
     p = nn.Parameter(torch.full((per_rank, D), 9.0), requires_grad=False)
     loader = vocab(axis="tp", mesh=resolve_mesh("model"))
@@ -195,7 +195,7 @@ def test_embedding_tp1_construct_attrs(fake_mesh):
         prefix="embed_tokens",
     )
     assert layer.num_embeddings == 100
-    assert layer.num_embeddings_padded == 128  # 100 → 128 (multiple of 64)
+    assert layer.num_embeddings_padded == 128  # 100 -> 128 (multiple of 64)
     assert layer.num_embeddings_per_partition == 128
     assert layer.shard_start == 0
     assert layer.shard_end == 100  # clamped to V_real
@@ -407,7 +407,7 @@ def test_lmhead_tied_forward_uses_shared_weight(fake_mesh):
 
 
 # --------------------------------------------------------------------------- #
-# End-to-end: embedding → linear-style → tied lm head, padding zeroing       #
+# End-to-end: embedding -> linear-style -> tied lm head, padding zeroing       #
 # --------------------------------------------------------------------------- #
 
 

@@ -17,7 +17,7 @@ finalises every workspace before capture, then enter the graph context
 and run once more to record the kernel sequence.
 
 Multiple shape buckets — e.g. one graph per padded prefix length — are
-managed by :class:`CudaGraphRegistry`, a small key→graph dict so the
+managed by :class:`CudaGraphRegistry`, a small key->graph dict so the
 runner can pick the right graph at replay time without an ``if`` ladder.
 
 Captureability of external state
@@ -39,6 +39,8 @@ from __future__ import annotations
 from typing import Any, Callable, Hashable
 
 import torch
+
+from phyai.parallel.state import graph_capture
 
 
 class CudaGraphError(RuntimeError):
@@ -174,12 +176,16 @@ class CudaGraph:
                 fn(**self._input_buffers)
         torch.cuda.current_stream().wait_stream(s)
 
-        # Capture.
+        # Capture. ``graph_capture()`` flips the phyai dispatcher
+        # contextvar so kernel selection (Linear backends, parallel
+        # collectives) honours the capture-safety filter — any kernel
+        # whose ``supports_capture()`` returns False is excluded from
+        # candidates while we're inside the capture region.
         self._graph = torch.cuda.CUDAGraph()
         graph_kwargs: dict[str, Any] = {}
         if self.mempool is not None:
             graph_kwargs["pool"] = self.mempool
-        with torch.cuda.graph(self._graph, **graph_kwargs):
+        with graph_capture(), torch.cuda.graph(self._graph, **graph_kwargs):
             self._output = fn(**self._input_buffers)
 
         self._captured = True
@@ -217,7 +223,7 @@ class CudaGraph:
 
 
 class CudaGraphRegistry:
-    """Key → :class:`CudaGraph` dict for shape-bucketed dispatch.
+    """Key -> :class:`CudaGraph` dict for shape-bucketed dispatch.
 
     Runners that capture multiple graphs (e.g. one per padded prefix
     length, or one per ``B`` value) hold a registry and look up by

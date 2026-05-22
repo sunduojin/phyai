@@ -4,9 +4,10 @@ The package ships the full pi0.5 inference path:
 
 * :mod:`configuration_pi05` — frozen dataclass configs.
 * :mod:`modeling_pi05` — every ``nn.Module`` (vision tower, paligemma
-  language model, gemma_300m action expert, joint stack with
-  :class:`~phyai.layers.attention.StaticCachedAttention`, action/time heads,
-  and the parameter-only :class:`PI05Model` container).
+  language model with :class:`~phyai.layers.attention.ARAttention`,
+  gemma_300m action expert with
+  :class:`~phyai.layers.attention.DiffusionAttention`, action/time
+  heads, and the parameter-only :class:`PI05Model` container).
 * :mod:`batch_layout_pi05` — index / packing helpers the scheduler invokes
   once per inference (cu_seqlens, write-indices, padded prefix layout,
   joint paged_kv_indices interleave).

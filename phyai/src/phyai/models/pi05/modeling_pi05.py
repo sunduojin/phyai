@@ -9,27 +9,27 @@ classes only — every parameter declares its own ``hf_keys`` so
 :func:`phyai.weights.load_pretrained` fills the model from
 ``pi05_base/model.safetensors`` without a remap.
 
-Sections (top → bottom):
+Sections (top -> bottom):
 
 1. **Engine defaults** — :func:`_resolve_engine_defaults`,
-   :func:`_adarms_backend`, :func:`_engine_to_cached_backend`.
+   :func:`_adarms_backend`, :func:`_engine_to_paged_backend`.
 2. **Vision tower** — SigLIP-So400m + multi_modal_projector.
 3. **PaliGemma language model** — gemma_2b text side. Decoder layer
-   has its own :class:`StaticCachedAttention` bound to ``layer_idx``
-   and a real ``forward(h, position_ids, rope, attn_ctx)`` that runs
-   pre-norm GQA attention + gated MLP end-to-end.
+   has its own :class:`ARAttention` bound to ``layer_idx`` and a real
+   ``forward(h, position_ids, rope, attn_ctx)`` that runs pre-norm
+   GQA attention + gated MLP end-to-end.
 4. **Action expert** — gemma_300m with AdaRMS conditioning + asymmetric
-   ``o_proj`` (joint attention output 2048 → expert hidden 1024).
+   ``o_proj`` (joint attention output 2048 -> expert hidden 1024).
    Each expert layer's ``forward`` mirrors the paligemma decoder plus
    per-norm gates threaded from the AdaRMS condition.
 5. **Action / time heads** — sinusoidal time embedding, action_in /
    action_out / time_mlp linears.
-6. **Top-level** — :class:`PI05Model` is a flat container holding
+5. **Top-level** — :class:`PI05Model` is a flat container holding
    ``vision``, ``paligemma_lm``, ``expert_stack``, ``rope`` (shared
    instance, passed by reference into stack forwards), and ``heads``.
    No top-level forward; the runners in :mod:`model_runner_pi05` build
-   a :class:`StaticCachedAttnCtx` and call
-   ``stack(h, position_ids, [cond,] rope, ctx)``.
+   the right ctx (``ARAttnCtx`` for paligemma, ``DiffusionAttnCtx`` for
+   the expert) and call ``stack(h, position_ids, [cond,] rope, ctx)``.
 
 Default ``prefix`` strings throughout match the
 ``paligemma_with_expert.*`` namespace of the pi0.5 base checkpoint;
@@ -78,10 +78,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from phyai.engine_config import get_engine_config
-from phyai.layers.attention.static_cached_attention import (
-    StaticCachedAttention,
-    StaticCachedAttnCtx,
-)
+from phyai.layers.attention.ar import ARAttention, ARAttnCtx
+from phyai.layers.attention.diffusion import DiffusionAttention, DiffusionAttnCtx
 from phyai.layers.conv import Conv2d
 from phyai.layers.layer_norm import AdaRMSNorm, GemmaRMSNorm, LayerNorm
 from phyai.layers.linear.layers import (
@@ -91,7 +89,7 @@ from phyai.layers.linear.layers import (
 )
 from phyai.layers.mlp.dense_mlp import DenseMLP
 from phyai.layers.rotary_embedding import RotaryEmbedding
-from phyai.layers.transformer_block import NoStateTransformerBlock
+from phyai.layers.transformer_block import TransformerBlock
 from phyai.layers.vocab_embedding.layers import VocabParallelEmbedding
 from phyai.models.pi05.configuration_pi05 import (
     GemmaExpertConfig,
@@ -128,9 +126,9 @@ def _resolve_engine_defaults(
         return params_dtype, attn_backend, norm_backend
     ec = get_engine_config()
     return (
-        ec.params_dtype if params_dtype is None else params_dtype,
-        ec.attn_backend if attn_backend is None else attn_backend,
-        ec.norm_backend if norm_backend is None else norm_backend,
+        ec.device.params_dtype if params_dtype is None else params_dtype,
+        ec.backends.attn if attn_backend is None else attn_backend,
+        ec.backends.norm if norm_backend is None else norm_backend,
     )
 
 
@@ -147,17 +145,19 @@ def _adarms_backend(norm_backend: str) -> str:
     return norm_backend
 
 
-def _engine_to_cached_backend(attn_backend: str) -> str:
-    """Map :class:`EngineConfig`'s ``attn_backend`` onto the
-    :class:`StaticCachedAttention` backend space.
+def _engine_to_paged_backend(attn_backend: str) -> str:
+    """Map :class:`EngineConfig`'s ``attn_backend`` onto the AR / Diffusion
+    paged backend name.
 
-    The engine exposes ``"flashinfer"`` / ``"sdpa"`` (and historically
-    ``"eager"``); the cached attention module wants
-    ``"flashinfer-paged"`` / ``"sdpa"``. Anything other than
-    ``"flashinfer"`` falls back to ``"sdpa"`` since the cached path
-    has no eager option.
+    ``"flashinfer"`` and ``"eager"`` are registered in both the AR and
+    Diffusion subpackages under those names. ``"sdpa"`` has no paged
+    backend (SDPA cannot read paged KV) and falls back to ``"eager"``
+    — the contiguous-slab reference path.
     """
-    return "flashinfer-paged" if attn_backend == "flashinfer" else "sdpa"
+    canonical = attn_backend.lower().replace("_", "-")
+    if canonical == "sdpa":
+        return "eager"
+    return canonical
 
 
 # ============================================================================ #
@@ -195,7 +195,7 @@ class PositionEmbedding(nn.Module):
     ) -> None:
         super().__init__()
         if device is None:
-            device = get_engine_config().device
+            device = get_engine_config().device.target
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self.prefix = prefix
@@ -217,7 +217,7 @@ class PositionEmbedding(nn.Module):
 
 
 class SiglipVisionEmbeddings(nn.Module):
-    """Patch embed + learned position embed → ``(B, num_patches, hidden_size)``.
+    """Patch embed + learned position embed -> ``(B, num_patches, hidden_size)``.
 
     HF state dict layout::
 
@@ -234,7 +234,7 @@ class SiglipVisionEmbeddings(nn.Module):
     ) -> None:
         super().__init__()
         if params_dtype is None:
-            params_dtype = get_engine_config().params_dtype
+            params_dtype = get_engine_config().device.params_dtype
         self.config = config
         self.prefix = prefix
         self.patch_embedding = Conv2d(
@@ -284,7 +284,7 @@ class SiglipVisionEncoder(nn.Module):
 
     SigLIP's encoder layer is pre-norm with LayerNorm (bias=True),
     bidirectional (causal=False), q/k/v/out_proj all biased, and a
-    plain ``fc1 → GELU(tanh) → fc2`` MLP (bias=True). HF source names
+    plain ``fc1 -> GELU(tanh) -> fc2`` MLP (bias=True). HF source names
     differ from the Llama / Gemma defaults: ``layer_norm1`` /
     ``layer_norm2`` for the norms and ``out_proj`` for the attention
     output projection.
@@ -306,7 +306,7 @@ class SiglipVisionEncoder(nn.Module):
         layer_prefix = f"{prefix}.layers" if prefix else ""
         self.layers = nn.ModuleList(
             [
-                NoStateTransformerBlock(
+                TransformerBlock(
                     hidden_size=config.hidden_size,
                     num_heads=config.num_attention_heads,
                     head_dim=config.head_dim,
@@ -339,7 +339,7 @@ class SiglipVisionEncoder(nn.Module):
 
 
 class SiglipVisionModel(nn.Module):
-    """SigLIP-So400m vision tower: embeddings → encoder → post_layernorm.
+    """SigLIP-So400m vision tower: embeddings -> encoder -> post_layernorm.
 
     Output shape ``(B, num_patches, hidden_size)``.
 
@@ -396,7 +396,7 @@ class SiglipVisionModel(nn.Module):
 
 
 class MultiModalProjector(nn.Module):
-    """PaliGemma multi_modal_projector: a single ``Linear(vision → text)``.
+    """PaliGemma multi_modal_projector: a single ``Linear(vision -> text)``.
 
     HF state dict::
 
@@ -417,7 +417,7 @@ class MultiModalProjector(nn.Module):
     ) -> None:
         super().__init__()
         if params_dtype is None:
-            params_dtype = get_engine_config().params_dtype
+            params_dtype = get_engine_config().device.params_dtype
         self.config = config
         self.prefix = prefix
         self.linear = ReplicatedLinear(
@@ -518,7 +518,7 @@ class PI05VisionTower(nn.Module):
 
 
 class PaliGemmaEmbedTokens(nn.Module):
-    """Gemma vocab embedding with ``sqrt(hidden_size)`` scaling.
+    """Gemma vocab embedding with the pi0.5-specific double scaling.
 
     Wraps :class:`VocabParallelEmbedding` so the post-lookup scale
     factor is fused into the embedding op (zero-cost when
@@ -528,6 +528,18 @@ class PaliGemmaEmbedTokens(nn.Module):
     This class points ``weight.hf_keys`` directly there so
     :func:`~phyai.weights.load_pretrained` matches the right tensor
     without needing a ``remap=`` argument.
+
+    Scale convention: pi0.5 lang tokens are scaled by ``hidden_size`` —
+    *not* the textbook ``sqrt(hidden_size)``. lerobot's port hits this
+    scale by composition: HF's ``GemmaTextScaledWordEmbedding`` applies
+    ``x sqrt(hidden_size)`` inside its forward, and pi0.5's
+    ``embed_prefix`` then multiplies by ``sqrt(hidden_size)`` again
+    (``lang_emb * math.sqrt(lang_emb_dim)``), total ``x hidden_size``.
+    The matching openpi reference does the same. Vision tokens, in
+    contrast, only get a single ``x sqrt(hidden_size)`` scale (applied
+    by :class:`PI05VisionTower.projection_scale`); lang and image
+    streams therefore live at *different* magnitudes by design — the
+    model was trained with that asymmetry.
 
     Forward signature: ``forward(input_ids: (B, S) int) -> (B, S, hidden_size)``.
     """
@@ -541,14 +553,14 @@ class PaliGemmaEmbedTokens(nn.Module):
     ) -> None:
         super().__init__()
         if params_dtype is None:
-            params_dtype = get_engine_config().params_dtype
+            params_dtype = get_engine_config().device.params_dtype
         self.config = config
         self.prefix = prefix
         self.embedding = VocabParallelEmbedding(
             num_embeddings=config.vocab_size,
             embedding_dim=config.hidden_size,
             params_dtype=params_dtype,
-            embed_scale=math.sqrt(config.hidden_size),
+            embed_scale=float(config.hidden_size),
             prefix=prefix,
         )
 
@@ -561,10 +573,10 @@ class PaliGemmaDecoderLayer(nn.Module):
 
     Holds ``input_layernorm`` (:class:`GemmaRMSNorm`),
     ``self_attn.qkv_proj`` (fused MQA 8/1),
-    ``self_attn.o_proj`` (2048→2048),
-    ``self_attn.attn`` (:class:`StaticCachedAttention` bound to this
+    ``self_attn.o_proj`` (2048->2048),
+    ``self_attn.attn`` (:class:`ARAttention` bound to this
     layer's ``layer_idx``), ``post_attention_layernorm``, and ``mlp``
-    (gated GeGLU, gelu_pytorch_tanh, 2048→16384→2048). All projection
+    (gated GeGLU, gelu_pytorch_tanh, 2048->16384->2048). All projection
     children are bias=False.
 
     The :class:`~phyai.layers.rotary_embedding.RotaryEmbedding`
@@ -626,13 +638,13 @@ class PaliGemmaDecoderLayer(nn.Module):
             params_dtype=params_dtype,
             prefix=f"{attn_prefix}.o_proj",
         )
-        self.attn = StaticCachedAttention(
+        self.attn = ARAttention(
             num_heads=self.q_heads_local,
             head_dim=config.head_dim,
             layer_id=layer_idx,
             num_kv_heads=self.kv_heads_local,
             causal=False,
-            backend=_engine_to_cached_backend(attn_backend),
+            backend=_engine_to_paged_backend(attn_backend),
         )
         self.post_attention_layernorm = GemmaRMSNorm(
             config.hidden_size,
@@ -669,7 +681,7 @@ class PaliGemmaDecoderLayer(nn.Module):
         h: torch.Tensor,
         position_ids: torch.Tensor,
         rope: RotaryEmbedding,
-        attn_ctx: StaticCachedAttnCtx,
+        attn_ctx: ARAttnCtx,
     ) -> torch.Tensor:
         """Pre-norm self-attention + gated MLP, with KV cache scatter.
 
@@ -682,7 +694,7 @@ class PaliGemmaDecoderLayer(nn.Module):
         n = self.input_layernorm(h)
         fused, _ = self.qkv_proj(n)
         q, k, v = self._split_qkv(fused, h.shape[:-1])
-        q, k = rope(q, k, position_ids)
+        q, k = rope(position_ids, q, k)
         attn_out = self.attn(q, k, v, attn_ctx)
         attn_flat = attn_out.reshape(*attn_out.shape[:-2], -1)
         out, _ = self.o_proj(attn_flat)
@@ -773,7 +785,7 @@ class PaliGemmaLanguageModel(nn.Module):
         inputs_embeds: torch.Tensor,
         position_ids: torch.Tensor,
         rope: RotaryEmbedding,
-        attn_ctx: StaticCachedAttnCtx,
+        attn_ctx: ARAttnCtx,
     ) -> torch.Tensor:
         """Run every decoder layer + final norm over ``inputs_embeds``."""
         h = inputs_embeds
@@ -802,7 +814,7 @@ class PI05ExpertLayer(nn.Module):
        lets the expert participate in the same attention space as the
        paligemma stream while keeping its own narrower hidden.
 
-    The layer's :class:`StaticCachedAttention` is bound to
+    The layer's :class:`DiffusionAttention` is bound to
     ``layer_idx`` — paged into the same per-layer slab paligemma's
     matching layer wrote during the prefix phase, so the joint
     attention range covers ``[cached prefix K/V, fresh suffix K/V]``
@@ -872,13 +884,13 @@ class PI05ExpertLayer(nn.Module):
             params_dtype=params_dtype,
             prefix=f"{attn_prefix}.o_proj",
         )
-        self.attn = StaticCachedAttention(
+        self.attn = DiffusionAttention(
             num_heads=self.q_heads_local,
             head_dim=config.head_dim,
             layer_id=layer_idx,
             num_kv_heads=self.kv_heads_local,
             causal=False,
-            backend=_engine_to_cached_backend(attn_backend),
+            backend=_engine_to_paged_backend(attn_backend),
         )
         self.post_attention_layernorm = AdaRMSNorm(
             hidden_size=config.hidden_size,
@@ -917,7 +929,7 @@ class PI05ExpertLayer(nn.Module):
         position_ids: torch.Tensor,
         cond: torch.Tensor,
         rope: RotaryEmbedding,
-        attn_ctx: StaticCachedAttnCtx,
+        attn_ctx: DiffusionAttnCtx,
     ) -> torch.Tensor:
         """Pre-AdaRMS self-attention + gated MLP, with KV cache scatter.
 
@@ -930,7 +942,7 @@ class PI05ExpertLayer(nn.Module):
         n, gate_attn = self.input_layernorm(h, cond)
         fused, _ = self.qkv_proj(n)
         q, k, v = self._split_qkv(fused, h.shape[:-1])
-        q, k = rope(q, k, position_ids)
+        q, k = rope(position_ids, q, k)
         attn_out = self.attn(q, k, v, attn_ctx)
         attn_flat = attn_out.reshape(*attn_out.shape[:-2], -1)
         out, _ = self.o_proj(attn_flat)
@@ -1008,7 +1020,7 @@ class PI05ExpertStack(nn.Module):
         position_ids: torch.Tensor,
         cond: torch.Tensor,
         rope: RotaryEmbedding,
-        attn_ctx: StaticCachedAttnCtx,
+        attn_ctx: DiffusionAttnCtx,
     ) -> torch.Tensor:
         """Run every expert layer + final AdaRMSNorm.
 
@@ -1077,7 +1089,7 @@ class ActionTimeHeads(nn.Module):
 
     Forward methods:
 
-    * :meth:`embed_action` — ``(B, T, max_action_dim) → (B, T, expert_hidden)``
+    * :meth:`embed_action` — ``(B, T, max_action_dim) -> (B, T, expert_hidden)``
     * :meth:`project_action` — inverse of ``embed_action``
     * :meth:`embed_time` — full time-MLP (sinusoidal + Linear + SiLU +
       Linear + SiLU), returns ``(B, expert_hidden)`` ready to feed
@@ -1092,7 +1104,7 @@ class ActionTimeHeads(nn.Module):
     ) -> None:
         super().__init__()
         if params_dtype is None:
-            params_dtype = get_engine_config().params_dtype
+            params_dtype = get_engine_config().device.params_dtype
         self.config = config
         self.expert_hidden = config.expert.hidden_size
         self.max_action_dim = config.max_action_dim
@@ -1128,20 +1140,20 @@ class ActionTimeHeads(nn.Module):
         )
 
     def embed_action(self, x: torch.Tensor) -> torch.Tensor:
-        """``(B, T, max_action_dim) → (B, T, expert_hidden)``."""
+        """``(B, T, max_action_dim) -> (B, T, expert_hidden)``."""
         out, _ = self.action_in_proj(x)
         return out
 
     def project_action(self, x: torch.Tensor) -> torch.Tensor:
-        """``(B, T, expert_hidden) → (B, T, max_action_dim)``."""
+        """``(B, T, expert_hidden) -> (B, T, max_action_dim)``."""
         out, _ = self.action_out_proj(x)
         return out
 
     def embed_time(self, time: torch.Tensor) -> torch.Tensor:
-        """``(B,) scalar time → (B, expert_hidden)`` AdaRMS condition.
+        """``(B,) scalar time -> (B, expert_hidden)`` AdaRMS condition.
 
         Pipeline: sinusoidal pos embed (with the configured
-        ``min_period`` / ``max_period``) → Linear → SiLU → Linear →
+        ``min_period`` / ``max_period``) -> Linear -> SiLU -> Linear ->
         SiLU.
 
         Casts the sinusoidal embedding to the time_mlp parameter dtype
@@ -1178,10 +1190,12 @@ class PI05Model(nn.Module):
         rope           : RotaryEmbedding                # shared between paligemma + expert
         heads          : ActionTimeHeads                # action_in/out + time MLP
 
-    Each decoder layer (paligemma + expert) owns its own
-    :class:`StaticCachedAttention` instance bound to its layer index;
-    the runners build a :class:`StaticCachedAttnCtx` per forward and
-    pass it through ``stack(h, position_ids, [cond,] rope, ctx)``. No
+    Each decoder layer (paligemma + expert) owns its own paged
+    attention instance bound to its layer index — paligemma uses
+    :class:`ARAttention` and the expert uses :class:`DiffusionAttention`.
+    The runners build the right ctx type per stack
+    (:class:`ARAttnCtx` / :class:`DiffusionAttnCtx`) and pass it
+    through ``stack(h, position_ids, [cond,] rope, ctx)``. No
     top-level forward lives here — the runners + scheduler in
     :mod:`phyai.models.pi05.model_runner_pi05` and
     :mod:`phyai.models.pi05.scheduler_single_batch_pi05` orchestrate
@@ -1264,9 +1278,10 @@ class PI05Model(nn.Module):
             norm_backend=norm_backend,
         )
 
-        # Text and expert stacks. Each layer owns its own
-        # StaticCachedAttention(layer_id=i); the runners build a
-        # StaticCachedAttnCtx per forward and thread it through the
+        # Text and expert stacks. Each layer owns its own paged
+        # attention bound to layer_id=i: paligemma uses ARAttention,
+        # expert uses DiffusionAttention. The runners build the
+        # right ctx type per stack and thread it through the
         # stack's forward(h, position_ids, [cond,] rope, ctx).
         #
         # The mathematical attention pattern of pi0.5 is a 2D
@@ -1305,7 +1320,7 @@ class PI05Model(nn.Module):
         )
 
         # Shared RoPE — held at the model level (not per-layer) so the
-        # 8 MiB cos/sin cache is allocated once, not 18×. Layers take
+        # 8 MiB cos/sin cache is allocated once, not 18x. Layers take
         # rope as a forward argument; nothing about RoPE is
         # layer-specific in pi0.5 (same head_dim / theta / max_pos for
         # paligemma and expert). RotaryEmbedding's ``device`` kwarg

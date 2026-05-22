@@ -20,7 +20,7 @@ example):
   ViT-style. SiLU is rejected here because no real model uses
   non-gated SiLU.
 
-Activation × gated matrix:
+Activation x gated matrix:
 
 ==========  ==============  ==========================  ===================================
 ``gated``   ``activation``  use case                    kernel
@@ -140,7 +140,7 @@ class DenseMLP(nn.Module):
         ``gelu_pytorch_tanh`` / ``gelu_new`` map to ``gelu_tanh``.
     gated:
         If ``True`` (default), build the gated SwiGLU/GeGLU path. If
-        ``False``, build the plain ``fc1→act→fc2`` path. Cannot combine
+        ``False``, build the plain ``fc1->act->fc2`` path. Cannot combine
         with ``activation="silu"``.
     bias:
         Bias on every internal linear. Llama / Gemma FFNs use

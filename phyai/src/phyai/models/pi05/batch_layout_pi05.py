@@ -421,7 +421,7 @@ def build_joint_last_page_len(
     """Joint-attention last-page length per sample.
 
     Real samples always have ``chunk_size > 0`` suffix tokens, so the
-    last page is full of one token (``page_size=1``) → 1.
+    last page is full of one token (``page_size=1``) -> 1.
 
     Returns ``(B,)`` int32.
     """

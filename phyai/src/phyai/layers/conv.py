@@ -96,7 +96,7 @@ class _ConvNd(nn.Module):
                     "padding='same' is incompatible with strided convolutions"
                 )
         if device is None:
-            device = get_engine_config().device
+            device = get_engine_config().device.target
 
         self.in_channels = in_channels
         self.out_channels = out_channels
