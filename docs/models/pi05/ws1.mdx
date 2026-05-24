@@ -46,6 +46,10 @@ PhyAI's <Tooltip headline="Engine + plugin" tip="Engine.__init__ runs a fixed se
   </Tree.Folder>
 </Tree>
 
+The diagram below illustrates how phyai's three model runners cooperate with the scheduler, and how the engine bootstrap hands off to `scheduler.setup()` and `scheduler.step()`.
+
+![PhyAI Engine ↔ Scheduler ↔ 3 Runners lifecycle](/images/models/pi05/engine_lifecycle.svg)
+
 # Running pi0.5
 
 <Steps>
@@ -131,3 +135,66 @@ The script prints per-phase latency stats (mean / median / std / min / max over 
 - Single GPU only. Tensor parallel, continuous batching, and preemption are all out of scope for `PI05WS1Scheduler`.
 - `max_batch_size` is fixed at engine construction. To change it, you must tear down and rebuild the engine.
 - The vision tower replays sequentially per real robot — it doesn't batch along the camera dimension.
+
+# Full example
+
+```python
+from pathlib import Path
+
+import torch
+
+from phyai.engine import Engine, EngineArgs
+from phyai.engine_config import DeviceConfig, EngineConfig, RuntimeConfig
+from phyai.models.pi05.configuration_pi05 import PI05Config
+from phyai.models.pi05.main_pi05 import PI05Args
+from phyai.models.pi05.scheduler_ws1_pi05 import PI05Request
+from phyai.utils import load_config
+
+CHECKPOINT_DIR = Path("/path/to/pi05_base/")  # change to your local checkpoint folder
+BATCH_SIZE = 1
+
+cfg = load_config(CHECKPOINT_DIR, PI05Config)
+device = torch.device("cuda")
+dtype = torch.bfloat16
+
+# 1. Construct the Engine — runs setup, weight loading, and CUDA graph capture in one shot.
+engine = Engine(
+    EngineArgs(
+        plugin="pi05",
+        plugin_args=PI05Args(
+            checkpoint_dir=CHECKPOINT_DIR,
+            max_batch_size=BATCH_SIZE,
+        ),
+        config=EngineConfig(
+            device=DeviceConfig(target="cuda", params_dtype=dtype),
+            runtime=RuntimeConfig(use_cuda_graph=True),
+        ),
+    )
+)
+try:
+    # 2. Build a dummy request: random pixels + single-token prompt.
+    input_ids = torch.zeros(
+        BATCH_SIZE, cfg.tokenizer_max_length, dtype=torch.int64, device=device
+    )
+    input_ids[:, 0] = 2  # any non-pad token id
+    request = PI05Request(
+        pixel_values=torch.rand(
+            BATCH_SIZE,
+            3,
+            3,
+            cfg.vision.image_size,
+            cfg.vision.image_size,
+            dtype=dtype,
+            device=device,
+        ),
+        input_ids=input_ids,
+        lang_lens=torch.ones(BATCH_SIZE, dtype=torch.int64, device=device),
+    )
+
+    # 3. Run one inference step.
+    actions = engine.step(request)
+    print(f"action chunk shape={tuple(actions.shape)}, dtype={actions.dtype}")
+finally:
+    # 4. Release scheduler buffers and tear down captured CUDA graphs.
+    engine.close()
+```
