@@ -1247,12 +1247,12 @@ class PI05Model(nn.Module):
         self.params_dtype = params_dtype
         self.attn_backend = attn_backend
 
-        # flashinfer's prefill kernel hard-asserts ``head_dim ∈ {64, 128, 256}``
-        # (see ``hopper/prefill_sm90.cuh``). SigLIP-So400m has head_dim=72
-        # (= 1152 / 16) and would JIT-fail. Auto-fall back to ``sdpa`` for
-        # the vision tower when the requested backend is flashinfer; the
-        # joint attention path continues with the user-requested backend
-        # (head_dim = 256 in pi0.5 always satisfies the assert).
+        # flashinfer's prefill kernel hard-asserts ``head_dim ∈ {64, 128, 256}``.
+        # SigLIP-So400m has head_dim=72 (= 1152 / 16) and would JIT-fail.
+        # Auto-fall back to ``sdpa`` for the vision tower when the requested
+        # backend is flashinfer; the joint attention path continues with the
+        # user-requested backend (head_dim = 256 in pi0.5 always satisfies the
+        # assert).
         vision_attn_backend = attn_backend
         if attn_backend == "flashinfer" and config.vision.head_dim not in (
             64,

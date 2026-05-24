@@ -18,7 +18,7 @@ It runs three phases:
 3. Equivalence check on a fresh ``max_batch_size=4`` engine. With
    ``actual_B=1`` (one real robot, three padded), the first output row
    must match the ``actual_B=4`` run where row 0 holds the same inputs
-   replicated 4×. This is the load-bearing correctness check for the
+   replicated 4x. This is the load-bearing correctness check for the
    sentinel-routed padding: if a padded sample's K/V leaks into row 0's
    attention, the equivalence breaks.
 
@@ -29,11 +29,16 @@ invariant.
 
 Run::
 
-    LD_LIBRARY_PATH=/usr/local/cuda-13.1/compat/lib uv run python examples/run_pi05.py
+    uv run python examples/run_pi05.py --checkpoint /path/to/pi05_base/
+
+The argument is a HuggingFace-style checkpoint **folder**: it must
+contain ``config.json`` and either ``model.safetensors`` or
+``model.safetensors.index.json`` plus its shards.
 """
 
 from __future__ import annotations
 
+import argparse
 import statistics
 from pathlib import Path
 
@@ -44,11 +49,7 @@ from phyai.engine_config import DeviceConfig, EngineConfig, RuntimeConfig
 from phyai.models.pi05.configuration_pi05 import PI05Config
 from phyai.models.pi05.main_pi05 import PI05Args
 from phyai.models.pi05.scheduler_ws1_pi05 import PI05Request
-
-
-PI05_BASE_WEIGHTS = Path(
-    "/mnt/bos-multimodal/wangchenghua/hf_models/pi05_base/model.safetensors"
-)
+from phyai.utils import load_config
 
 
 def make_dummy_request(
@@ -151,12 +152,12 @@ def report(
     print(f"  has NaN            : {bool(torch.isnan(actions).any().item())}")
 
 
-def make_engine(max_batch_size: int) -> Engine:
+def make_engine(checkpoint_dir: Path, max_batch_size: int) -> Engine:
     return Engine(
         EngineArgs(
             plugin="pi05",
             plugin_args=PI05Args(
-                weights_paths=[PI05_BASE_WEIGHTS],
+                checkpoint_dir=checkpoint_dir,
                 max_batch_size=max_batch_size,
             ),
             config=EngineConfig(
@@ -168,13 +169,27 @@ def make_engine(max_batch_size: int) -> Engine:
 
 
 def main() -> None:
-    if not PI05_BASE_WEIGHTS.exists():
-        raise FileNotFoundError(
-            f"pi05_base weights not found at {PI05_BASE_WEIGHTS}; edit the "
-            f"PI05_BASE_WEIGHTS constant or copy the safetensors file."
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        required=True,
+        help=(
+            "Path to the pi05_base checkpoint folder. Must contain "
+            "config.json and either model.safetensors or "
+            "model.safetensors.index.json with its shards."
+        ),
+    )
+    args = parser.parse_args()
+
+    if not args.checkpoint.is_dir():
+        raise NotADirectoryError(
+            f"--checkpoint must be a directory, got: {args.checkpoint}"
         )
 
-    plugin_cfg = PI05Config()  # default geometry == pi05_base
+    # Read the same config the engine will load, so dummy-request shapes
+    # match what the model expects.
+    plugin_cfg = load_config(args.checkpoint, PI05Config)
     device = torch.device("cuda")
     dtype = torch.bfloat16
 
@@ -184,7 +199,7 @@ def main() -> None:
     # ----------------------------------------------------------------- #
     # Phase 1: max_batch_size=1 regression.                             #
     # ----------------------------------------------------------------- #
-    engine = make_engine(max_batch_size=1)
+    engine = make_engine(args.checkpoint, max_batch_size=1)
     try:
         torch.manual_seed(0)
         torch.cuda.manual_seed_all(0)
@@ -213,7 +228,7 @@ def main() -> None:
     # ----------------------------------------------------------------- #
     # Phase 2: max_batch_size=4, actual_B=4 saturated multi-batch.      #
     # ----------------------------------------------------------------- #
-    engine = make_engine(max_batch_size=4)
+    engine = make_engine(args.checkpoint, max_batch_size=4)
     try:
         torch.manual_seed(0)
         torch.cuda.manual_seed_all(0)

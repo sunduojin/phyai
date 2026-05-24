@@ -6,13 +6,17 @@ The whole load chain in one place:
    ``param.weight_loader`` into a dispatch index keyed by HF tensor
    name. Params without ``hf_keys`` are skipped (tied weights, RoPE
    buffers, etc.).
-2. Open every safetensors file lazily; for each key, optionally remap
-   via ``remap`` (callable or dict), look up in the index, and
-   dispatch.
-3. Track every key seen, every cast, every miss; build a
+2. Resolve ``source`` to a concrete list of safetensors shards: a
+   checkpoint folder is expanded via
+   :func:`phyai.utils.checkpoint.find_safetensors` (honouring
+   ``model.safetensors.index.json``); a single file path becomes
+   ``[path]``; an iterable is consumed as-is.
+3. Open every shard lazily; for each key, optionally remap via
+   ``remap`` (callable or dict), look up in the index, and dispatch.
+4. Track every key seen, every cast, every miss; build a
    :class:`LoadReport`. Strict mode raises if anything required is
    missing or any HF key was unexpected.
-4. Walk ``model.modules()``; call ``module.post_load()`` where defined
+5. Walk ``model.modules()``; call ``module.post_load()`` where defined
    so quant specs can do scale fixups (e.g. fp8 per-tensor ->
    per-channel fan-out).
 """
@@ -28,6 +32,7 @@ import torch
 import torch.nn as nn
 from safetensors import safe_open
 
+from phyai.utils.checkpoint import find_safetensors
 from phyai.weights.shards import WeightLoader, replicated
 
 
@@ -104,9 +109,30 @@ def _resolve_remap(
     )
 
 
+def _resolve_source(
+    source: str | Path | Iterable[str | Path],
+) -> list[Path]:
+    """Normalise ``source`` to a concrete list of safetensors file paths.
+
+    Accepts three shapes:
+
+    * a checkpoint folder (``str``/``Path`` pointing at a directory) —
+      expanded via :func:`phyai.utils.checkpoint.find_safetensors`,
+    * a single safetensors file path (``str``/``Path`` pointing at a
+      file) — wrapped as ``[path]``,
+    * an iterable of file paths — materialised as a list.
+    """
+    if isinstance(source, (str, Path)):
+        path = Path(source)
+        if path.is_dir():
+            return find_safetensors(path)
+        return [path]
+    return [Path(p) for p in source]
+
+
 def load_pretrained(
     model: nn.Module,
-    paths: Iterable[str | Path],
+    source: str | Path | Iterable[str | Path],
     *,
     remap: Callable[[str], str | None] | dict[str, str] | None = None,
     strict: bool = True,
@@ -119,7 +145,14 @@ def load_pretrained(
         have ``param.hf_keys`` and ``param.weight_loader`` attached
         (the standard parallel-Linear classes do this in their
         ``__init__``).
-    paths : iterable of safetensors file paths.
+    source : one of —
+
+        * a checkpoint **folder** (single ``str``/``Path``) —
+          ``model.safetensors.index.json`` is consumed if present,
+          otherwise ``model.safetensors`` / glob fallback;
+        * a single safetensors **file** path; or
+        * an iterable of safetensors file paths (advanced / test).
+
     remap : optional HF-key rewriter. If callable, called with each
         file key; return the lookup key, or ``None`` to drop the key.
         If a dict, treated as substring rewrite rules applied in
@@ -133,6 +166,7 @@ def load_pretrained(
     LoadReport with diagnostics.
     """
     remap_fn = _resolve_remap(remap)
+    paths = _resolve_source(source)
 
     # 1. Build dispatch index from data on params.
     index: dict[str, tuple[nn.Parameter, "int | str | None", WeightLoader]] = {}

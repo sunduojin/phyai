@@ -59,8 +59,8 @@ class FlashInferKernel:
         # The captured kernel is a single cuDNN / cuBLAS / cutlass / tgv
         # matmul launch — the Python wrapper's per-call overhead also
         # disappears inside the graph (it only runs at capture time).
-        # On Blackwell this is the only way to land on the cutlass / tgv
-        # paths from inside captured runners; on Hopper it's neutral.
+        # On sm_100+ this is the only way to land on the cutlass / tgv
+        # paths from inside captured runners; on sm_90 it's neutral.
         return True
 
     def can_handle(self, probe: KernelProbe) -> bool:

@@ -75,7 +75,7 @@ def init(
 
     if validate:
         default_specs = ["bf16", "fp8_per_tensor", "fp8_per_channel"]
-        # Block-FP8 only validates on Blackwell; skip on older hardware so
+        # Block-FP8 only validates on sm_100+; skip on older hardware so
         # developer laptops don't fail init.
         sm = sm_arch()
         if sm >= 100:

@@ -2,13 +2,16 @@
 
 Two pieces, both consumed by :class:`~phyai.engine.Engine`:
 
-* :class:`PI05Args` — typed arg bundle. Carries the safetensors weight
-  paths, an optional :class:`PI05Config` (defaults to ``pi05_base``),
-  and the model-specific scheduler knob ``max_batch_size``.
+* :class:`PI05Args` — typed arg bundle. Carries an HF-style
+  ``checkpoint_dir`` (the folder with ``config.json`` +
+  ``model.safetensors`` / ``model.safetensors.index.json``), an
+  optional :class:`PI05Config` override, and the model-specific
+  scheduler knob ``max_batch_size``.
 * :class:`PI05Entry` — :class:`~phyai.engine.Entry` subclass that
-  builds a :class:`PI05Model`, runs :func:`load_pretrained`,
-  constructs and warms a :class:`PI05WS1Scheduler`, then
-  forwards :meth:`step` to it.
+  resolves the checkpoint folder via
+  :func:`phyai.utils.load_checkpoint`, builds a :class:`PI05Model`,
+  runs :func:`load_pretrained`, constructs and warms a
+  :class:`PI05WS1Scheduler`, then forwards :meth:`step` to it.
 
 Importing this module registers ``PI05Entry`` with the engine via
 ``@Engine.register`` at class-definition time. The engine's own
@@ -26,7 +29,7 @@ a second source of truth.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, ClassVar
 
@@ -40,6 +43,7 @@ from phyai.models.pi05.scheduler_ws1_pi05 import (
     PI05Request,
     PI05WS1Scheduler,
 )
+from phyai.utils import load_config
 from phyai.weights import load_pretrained
 
 
@@ -92,22 +96,25 @@ def _compose_remap(
 class PI05Args(EntryArgs):
     """Args bundle for the pi0.5 plugin.
 
-    ``weights_paths`` is empty by default for unit-test / debug paths —
-    :meth:`PI05Entry.setup` then constructs the model with random init
-    and skips :func:`load_pretrained`. Production callers always supply
-    at least one safetensors path.
+    HuggingFace-style: ``checkpoint_dir`` is one folder containing both
+    ``config.json`` and the safetensors shard(s) (single
+    ``model.safetensors`` *or* ``model.safetensors.index.json`` plus
+    its shards). It is empty by default for unit-test / debug paths —
+    :meth:`PI05Entry.setup` then constructs the model with the default
+    :class:`PI05Config` and skips :func:`load_pretrained`.
 
-    ``config`` defaults to the public ``pi05_base`` geometry; override
-    with ``PI05Config.from_json(...)`` (or a hand-built
-    :class:`PI05Config`) when running a non-base variant.
+    ``config`` is an optional override; when ``None`` (the default) the
+    config is read from ``checkpoint_dir/config.json`` if a directory
+    is supplied, otherwise it falls back to ``PI05Config()`` (the
+    public ``pi05_base`` geometry).
 
     ``weight_remap`` and ``weight_strict`` pass straight through to
     :func:`load_pretrained` for checkpoints whose key names diverge
     from upstream pi0.5 (HF rewrites, mid-training renames, etc.).
     """
 
-    weights_paths: list[str | Path] = field(default_factory=list)
-    config: PI05Config = field(default_factory=PI05Config)
+    checkpoint_dir: str | Path | None = None
+    config: PI05Config | None = None
     max_batch_size: int = 1
     weight_remap: Callable[[str], str | None] | dict[str, str] | None = None
     weight_strict: bool = True
@@ -129,12 +136,21 @@ class PI05Entry(Entry):
     def setup(self, args: PI05Args) -> None:  # type: ignore[override]
         """Build model, load weights, construct + warm the scheduler."""
         eng = get_engine_config()
-        self.model = PI05Model(args.config, device=eng.device.target)
 
-        if args.weights_paths:
+        # Resolve config: explicit override > checkpoint folder > defaults.
+        if args.config is not None:
+            config = args.config
+        elif args.checkpoint_dir is not None:
+            config = load_config(args.checkpoint_dir, PI05Config)
+        else:
+            config = PI05Config()
+
+        self.model = PI05Model(config, device=eng.device.target)
+
+        if args.checkpoint_dir is not None:
             load_pretrained(
                 self.model,
-                args.weights_paths,
+                args.checkpoint_dir,
                 remap=_compose_remap(args.weight_remap),
                 strict=args.weight_strict,
             )

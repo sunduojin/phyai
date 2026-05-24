@@ -9,7 +9,7 @@ subclasses (frozen, JSON-loadable, mapping-style read access):
 * :class:`PI05Config` — top-level composition + flow-matching knobs.
 
 Defaults across all four match the public ``pi05_base`` checkpoint at
-``/mnt/bos-multimodal/wangchenghua/hf_models/pi05_base/model.safetensors``.
+https://huggingface.co/lerobot/pi05_base.
 
 Loaded from a ``config.json`` via :meth:`PretrainedConfig.from_json`;
 unknown keys are silently dropped. Nested sub-configs are NOT auto-built

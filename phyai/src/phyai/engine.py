@@ -10,7 +10,7 @@ in-process Python (tests, scripts, notebooks).
 Three concepts:
 
 * :class:`EntryArgs` — empty dataclass base. Each plugin declares a
-  subclass with its own fields (e.g. ``PI05Args(weights_paths=...)``).
+  subclass with its own fields (e.g. ``PI05Args(checkpoint_dir=...)``).
   EntryArgs are programmatic: typed, defaulted, IDE-friendly. No
   argparse, no string parsing.
 * :class:`Entry` — ABC every plugin inherits. Defines :meth:`setup`
