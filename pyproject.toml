@@ -51,3 +51,7 @@ pythonpath = [
     "phyai-model-optimizer/src",
     "phyai-utils-tools/src",
 ]
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
