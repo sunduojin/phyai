@@ -75,7 +75,7 @@ def benchmark(
 
     times_ms: list[float] = []
     for _ in range(n_timed):
-        start = torch.cuda.Event(enable_timing=True)
+        start = torch.cuda.Event(enable_timing=True)#记录开始和结束时间
         end = torch.cuda.Event(enable_timing=True)
         start.record()
         actions = engine.step(request)

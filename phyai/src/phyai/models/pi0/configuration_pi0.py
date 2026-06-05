@@ -1,20 +1,16 @@
-"""Configs for pi0.5.
+"""Configs for pi0.
 
-Three layered dataclasses, all :class:`~phyai.models.configuration.PretrainedConfig`
-subclasses (frozen, JSON-loadable, mapping-style read access):
+The shape mirrors :mod:`phyai.models.pi05.configuration_pi05`, but the
+top-level composition follows pi0:
 
-* :class:`SiglipVisionConfig` — vision tower (SigLIP-So400m).
-* :class:`PaliGemmaTextConfig` — language model (gemma_2b text side).
-* :class:`GemmaExpertConfig` — action expert (gemma_300m, AdaRMS).
-* :class:`PI05Config` — top-level composition + flow-matching knobs.
+* :class:`SiglipVisionConfig` -- PaliGemma vision tower.
+* :class:`PaliGemmaTextConfig` -- gemma_2b text side.
+* :class:`GemmaExpertConfig` -- gemma_300m action expert without AdaRMS.
+* :class:`PI0Config` -- full model geometry plus flow-matching knobs.
 
-Defaults across all four match the public ``pi05_base`` checkpoint at
-https://huggingface.co/lerobot/pi05_base.
-
-Loaded from a ``config.json`` via :meth:`PretrainedConfig.from_json`;
-unknown keys are silently dropped. Nested sub-configs are NOT auto-built
-from a flat top-level policy JSON — the caller constructs them
-explicitly when overriding from defaults.
+Unlike pi0.5, pi0 keeps robot state as a numeric expert-side token:
+``state_proj`` maps ``max_state_dim`` to the expert hidden width. The
+suffix block is therefore ``[state_token, action_tokens...]``.
 """
 
 from __future__ import annotations
@@ -26,13 +22,7 @@ from phyai.models.configuration import PretrainedConfig
 
 @dataclass(frozen=True)
 class SiglipVisionConfig(PretrainedConfig):
-    """Static config for the SigLIP-So400m vision tower used by pi0.5.
-
-    All defaults match the ``vision_tower.vision_model`` keys of the
-    public pi0.5 / paligemma-3b checkpoints. Callers building a
-    different SigLIP variant (e.g. So400m@384, base@224) override the
-    geometry knobs and leave the rest at defaults.
-    """
+    """Static config for the PaliGemma/SigLIP vision tower used by pi0."""
 
     hidden_size: int = 1152
     num_hidden_layers: int = 27
@@ -42,8 +32,6 @@ class SiglipVisionConfig(PretrainedConfig):
     patch_size: int = 14
     num_channels: int = 3
     layer_norm_eps: float = 1e-6
-    # Output dim of the multi_modal_projector; equals the text-side
-    # hidden size (gemma_2b: 2048, gemma_300m: 1024).
     projection_dim: int = 2048
 
     def __post_init__(self) -> None:
@@ -63,24 +51,13 @@ class SiglipVisionConfig(PretrainedConfig):
         return (self.image_size // self.patch_size) ** 2
 
     @property
-    def head_dim(self) -> int:#每个head的维度
+    def head_dim(self) -> int:
         return self.hidden_size // self.num_attention_heads
 
 
 @dataclass(frozen=True)
 class PaliGemmaTextConfig(PretrainedConfig):
-    """Config for the PaliGemma language model — gemma_2b text side.
-
-    Defaults match the ``language_model.*`` keys of the pi0.5 base
-    checkpoint. PaliGemma's text tower is decoder-only Gemma with MQA
-    (``num_key_value_heads=1``); attention is **non-causal** (prefix-LM)
-    in pi0.5's usage but the config does not encode that — it lives in
-    the modeling code.
-
-    The action expert uses :class:`GemmaExpertConfig` (gemma_300m) and
-    must share ``num_attention_heads * head_dim`` with this config so
-    the joint attention space (8 * 256 = 2048) lines up.
-    """
+    """Config for the PaliGemma language model -- gemma_2b text side."""
 
     hidden_size: int = 2048
     num_hidden_layers: int = 18
@@ -104,27 +81,18 @@ class PaliGemmaTextConfig(PretrainedConfig):
 
     @property
     def joint_attention_dim(self) -> int:
-        """Total dim of the joint attention space (heads * head_dim).
+        """Total dim of the joint attention space (heads * head_dim)."""
 
-        Both the text tower and the action expert project Q to this dim
-        and project K/V to ``num_key_value_heads * head_dim``; the two
-        streams must agree on this number for joint attention.
-        """
         return self.num_attention_heads * self.head_dim
 
 
 @dataclass(frozen=True)
 class GemmaExpertConfig(PretrainedConfig):
-    """Config for the gemma_300m action expert with AdaRMS conditioning.
+    """Config for the pi0 gemma_300m action expert.
 
-    Defaults match the ``gemma_expert.*`` keys of the pi0.5 base
-    checkpoint. AdaRMS is on by default (``use_adarms=True``); the
-    timestep embedding (``time_mlp`` output, dim 1024) feeds AdaRMS as
-    the conditioning signal, so ``adarms_cond_dim == hidden_size``.
-
-    The expert has no ``embed_tokens`` (the upstream pi0.5 sets it to
-    ``None``); the input to the expert is the action chunk projected by
-    ``action_in_proj`` (1024-D), not vocab tokens.
+    pi0 does not use AdaRMS conditioning in the expert. Timestep is
+    fused into each action token by ``action_time_mlp_in/out`` before
+    entering the expert stack.
     """
 
     hidden_size: int = 1024
@@ -136,8 +104,8 @@ class GemmaExpertConfig(PretrainedConfig):
     rms_norm_eps: float = 1e-6
     rope_theta: float = 10000.0
     max_position_embeddings: int = 8192
-    use_adarms: bool = True
-    adarms_cond_dim: int = 1024
+    use_adarms: bool = False
+    adarms_cond_dim: int | None = None
 
     def __post_init__(self) -> None:
         if self.num_attention_heads % self.num_key_value_heads != 0:
@@ -150,8 +118,7 @@ class GemmaExpertConfig(PretrainedConfig):
         if self.use_adarms and self.adarms_cond_dim != self.hidden_size:
             raise ValueError(
                 f"adarms_cond_dim={self.adarms_cond_dim} must equal "
-                f"hidden_size={self.hidden_size} when use_adarms=True "
-                f"(time_mlp produces hidden_size-dim output that feeds AdaRMS)."
+                f"hidden_size={self.hidden_size} when use_adarms=True."
             )
 
     @property
@@ -160,23 +127,12 @@ class GemmaExpertConfig(PretrainedConfig):
 
 
 @dataclass(frozen=True)
-class PI05Config(PretrainedConfig):
-    """Top-level pi0.5 inference config: vision + text + expert + flow-matching.
+class PI0Config(PretrainedConfig):
+    """Top-level pi0 config: vision + text + expert + flow matching.
 
-    Defaults match ``pi05_base`` end-to-end. ``vision.projection_dim``
-    must equal ``text.hidden_size`` (the multi_modal_projector lifts
-    SigLIP's tokens into the LM embedding space), and ``text`` and
-    ``expert`` must share ``joint_attention_dim`` (the joint attention
-    output space the two streams write into).
-
-    Flow-matching knobs:
-
-    * ``chunk_size``: number of action tokens in one suffix block (50).
-    * ``max_action_dim``: action vector width before action_in_proj (32).
-    * ``num_inference_steps``: Euler steps in :func:`sample_actions` (10).
-    * ``min_period`` / ``max_period``: frequency span of the sinusoidal
-      time embedding (4e-3 / 4.0).
-    * ``tokenizer_max_length``: language token padding budget (200).
+    Defaults follow the LeRobot/OpenPI pi0 PyTorch implementation:
+    PaliGemma gemma_2b for image/language, gemma_300m for the action
+    expert, a 32-D padded robot state vector, and 50-step action chunks.
     """
 
     vision: SiglipVisionConfig = field(default_factory=SiglipVisionConfig)
@@ -184,11 +140,12 @@ class PI05Config(PretrainedConfig):
     expert: GemmaExpertConfig = field(default_factory=GemmaExpertConfig)
 
     chunk_size: int = 50
+    max_state_dim: int = 32
     max_action_dim: int = 32
     num_inference_steps: int = 10
     min_period: float = 4e-3
     max_period: float = 4.0
-    tokenizer_max_length: int = 200
+    tokenizer_max_length: int = 48  
 
     def __post_init__(self) -> None:
         if self.vision.projection_dim != self.text.hidden_size:
@@ -220,23 +177,45 @@ class PI05Config(PretrainedConfig):
                 f"expert.num_hidden_layers={self.expert.num_hidden_layers}; "
                 f"joint decoder pairs one text layer with one expert layer."
             )
+        if self.expert.use_adarms:
+            raise ValueError("pi0 expert must use use_adarms=False.")
         if self.chunk_size <= 0:
             raise ValueError(f"chunk_size must be positive, got {self.chunk_size}.")
+        if self.max_state_dim <= 0:
+            raise ValueError(
+                f"max_state_dim must be positive, got {self.max_state_dim}."
+            )
+        if self.max_action_dim <= 0:
+            raise ValueError(
+                f"max_action_dim must be positive, got {self.max_action_dim}."
+            )
         if self.num_inference_steps <= 0:
             raise ValueError(
                 f"num_inference_steps must be positive, got "
                 f"{self.num_inference_steps}."
             )
+        if self.tokenizer_max_length <= 0:
+            raise ValueError(
+                f"tokenizer_max_length must be positive, got "
+                f"{self.tokenizer_max_length}."
+            )
 
     @property
     def num_layers(self) -> int:
-        """Layer count for the joint stack — text and expert share it."""
+        """Layer count for the joint stack -- text and expert share it."""
+
         return self.text.num_hidden_layers
+
+    @property
+    def suffix_len(self) -> int:
+        """Number of expert-side suffix tokens: state token + action chunk."""
+
+        return 1 + self.chunk_size
 
 
 __all__ = [
-    "SiglipVisionConfig",
-    "PaliGemmaTextConfig",
     "GemmaExpertConfig",
-    "PI05Config",
+    "PaliGemmaTextConfig",
+    "PI0Config",
+    "SiglipVisionConfig",
 ]
