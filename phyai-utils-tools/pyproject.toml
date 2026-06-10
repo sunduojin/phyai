@@ -4,6 +4,7 @@ dynamic = ["version"]
 description = "phyai — Shared utilities and tools."
 requires-python = ">=3.12"
 dependencies = [
+    "huggingface-hub",
     "numpy",
     "torch==2.11",
     "transformers==5.8.1",

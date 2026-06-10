@@ -55,6 +55,9 @@ CPU is the default for tests — `phyai/tests/conftest.py` autouses a fixture th
 ## More Conventions provide by human
 
 - all log function in phyai package should use phyai.utils' logging api. U judge using `this_rank_log` or `all_rank_log`
+- Using ENGLISH for comment.
+- Be aware that phyai is a general inference engine for physical AI. Do not modify general components(such as phyai.layers, phyai.runtime) in phyai when supporting new models. Unless lack of layers, or lack of phyai's system components. Modify phyai's general components is a big deal, you should tell user first, let them agree.
+- When user want you to commit to github. You should run pre-commit first.
 - using `flashinfer` by default if CP is not set. When CP is set, pls using `MagiAttention` whose github repo is https://github.com/SandAI-org/MagiAttention.
 
 ## SKILLS! Use SKILLS if needed!
