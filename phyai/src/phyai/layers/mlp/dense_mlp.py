@@ -223,7 +223,15 @@ class DenseMLP(nn.Module):
             # input. Today the act and quant happen as two separate
             # kernels.
             self._act_and_mul = _resolve_gated_act(activation)
-            self._act_fn = None
+            #######
+            # fp32 fallback — flashinfer fused kernels only support fp16/bf16
+            self._act_fn = {
+                "silu": F.silu,
+                "gelu": F.gelu,
+                "gelu_tanh": functools.partial(F.gelu, approximate="tanh"),
+            }[self.activation]
+            ######
+            #self._act_fn = None
         else:
             self.fc1 = ColumnParallelLinear(
                 in_features=hidden_size,
@@ -253,16 +261,30 @@ class DenseMLP(nn.Module):
             self._act_and_mul = None
             self._act_fn = _resolve_plain_act(activation)
 
+    # def forward(self, x: torch.Tensor) -> torch.Tensor:
+    #     if self.gated:
+    #         fused, _ = self.gate_up_proj(x)
+    #         activated = self._act_and_mul(fused)
+    #         out, _ = self.down_proj(activated)
+    #         return out
+    #     h, _ = self.fc1(x)
+    #     h = self._act_fn(h)
+    #     out, _ = self.fc2(h)
+    #     return out
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.gated:
-            fused, _ = self.gate_up_proj(x)
-            activated = self._act_and_mul(fused)
-            out, _ = self.down_proj(activated)
-            return out
-        h, _ = self.fc1(x)
-        h = self._act_fn(h)
-        out, _ = self.fc2(h)
-        return out
+      if self.gated:
+          fused, _ = self.gate_up_proj(x)
+          if fused.dtype in (torch.float16, torch.bfloat16):
+              activated = self._act_and_mul(fused)
+          else:
+              gate, up = fused.chunk(2, dim=-1)
+              activated = self._act_fn(gate) * up
+          out, _ = self.down_proj(activated)
+          return out
+      h, _ = self.fc1(x)
+      h = self._act_fn(h)
+      out, _ = self.fc2(h)
+      return out
 
     def extra_repr(self) -> str:
         return (

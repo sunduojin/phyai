@@ -1,52 +1,4 @@
-"""pi0.5 model runners: vision, LLM backbone, action expert.
-
-Three runners decompose the pi0.5 inference path into independently
-captureable units. Each runner takes the sub-modules it needs as
-constructor arguments — there is no dependency on :class:`PI05Model`
-at this layer, so a runner can be reused for any composition that
-exposes the same parts.
-
-* :class:`PI05VisionRunner` wraps :class:`PI05VisionTower` at fixed
-  shape ``(3, 3, H, W)`` (three cameras per call) and produces image
-  embeddings ``(3, num_patches, projection_dim)``.
-* :class:`PI05LLMRunner` runs the prefix forward — paligemma's 18
-  decoder layers — at fixed shape ``(B * n_per_sample, hidden_size)``,
-  writing per-layer K/V into a :class:`KVCachePool`.
-* :class:`PI05ExpertRunner` runs one Euler denoise step (action
-  embedding + 18 expert layers + action projection) at fixed shape
-  ``(B, chunk_size, max_action_dim)`` for the input ``x_t`` and
-  ``(B,)`` for the timestep scalar. The runner reads cached prefix
-  K/V and writes suffix K/V into the same cache pool.
-
-Backend ownership
------------------
-Paged-attention backends are constructed once per runner via the
-per-stack registry factory ``factory(runner=self)`` — the backend
-reads ``runner.batch_size`` / ``runner.max_paged_kv_indices`` / etc.
-and allocates its own static buffers in
-:meth:`init_cuda_graph_state`. Layers do NOT own the backend; the
-runner threads it through every layer's :meth:`forward` via the
-flavor-specific ctx (:class:`ARAttnCtx` for paligemma,
-:class:`DiffusionAttnCtx` for the expert).
-
-The two attention backends a runner supports:
-
-* ``"flashinfer"`` — production GPU path. The backend builds a
-  paged-prefill wrapper with ``use_cuda_graph=True`` and
-  pre-allocated index buffers; :meth:`replay_metadata` re-plans them
-  in place per inference so the captured ``run`` reads through the
-  updated values.
-* ``"eager"`` — CPU / CI fallback. The contiguous-slab matmul path;
-  not graph-captureable; the runner falls back to per-step
-  :meth:`init_forward_metadata`.
-
-The pi0.5 block-prefix-LM mask (image+lang see image+lang only;
-action sees image+lang+action) is realised by the two-runner split:
-the LLM runner runs paligemma in isolation, then the expert runner
-runs joint attention against the cached prefix K/V. Both runners
-share a single :class:`RotaryEmbedding` (the joint attention space
-requires it), so the constructor takes it as a direct argument.
-"""
+"""pi0.5 model runners: vision, LLM backbone, action expert."""
 
 from __future__ import annotations
 
@@ -160,20 +112,23 @@ def _copy_modulation_tables_(
 class PI05VisionRunner(ModelRunner):
     """SigLIP vision-tower runner with optional CUDA-graph capture.
 
-    pi0.5 uses three cameras per inference; the runner is captured at
-    fixed shape ``(3, 3, image_size, image_size)`` and replayed once per
-    robot in the scheduler's batch (``B`` times when ``B > 1``).
+    pi0.5 runs all of a robot's cameras in one tower call; the runner is
+    captured at fixed shape ``(num_images, C, image_size, image_size)`` and
+    replayed once per robot in the scheduler's batch (``B`` times when
+    ``B > 1``). ``num_images`` is fixed at construction (3 for pi05_base).
     """
 
     def __init__(
         self,
         vision_tower: PI05VisionTower,
         *,
+        num_images: int = 3,
         params_dtype: torch.dtype,
         device: torch.device | str,
         use_cuda_graph: bool = True,
     ) -> None:
         self.vision_tower = vision_tower
+        self.num_images = int(num_images)
         self.params_dtype = params_dtype
         self.device = torch.device(device)
         self.use_cuda_graph = bool(use_cuda_graph)
@@ -189,14 +144,15 @@ class PI05VisionRunner(ModelRunner):
             logger,
             logging.INFO,
             "Entering PI05VisionRunner.setup: capturing vision-tower CUDA graph "
-            "at fixed shape (3, %d, %d, %d).",
+            "at fixed shape (%d, %d, %d, %d).",
+            self.num_images,
             self.num_channels,
             self.image_size,
             self.image_size,
         )
         example = {
             "pixel_values": torch.zeros(
-                3,
+                self.num_images,
                 self.num_channels,
                 self.image_size,
                 self.image_size,
@@ -231,7 +187,7 @@ class PI05LLMRunner(ModelRunner):
     buffers in :meth:`init_cuda_graph_state` and
     re-plans them in place per inference via
     :meth:`replay_metadata` (graph) or
-    :meth:`init_forward_metadata` (eager fallback).
+    :meth:`init_forward_metadata` (non-cuda-graph path).
 
     Returns ``None`` from :meth:`forward` — the cache pool side-effect
     is the only output the scheduler consumes.
@@ -296,9 +252,9 @@ class PI05LLMRunner(ModelRunner):
     def setup(self, n_per_sample_buckets: list[int] | None = None) -> None:
         all_ranks_log(logger, logging.INFO, "Entering PI05LLMRunner.setup")
         # Always allocate static buffers + build wrapper — graph mode
-        # needs them, and eager mode benefits from stable addresses. They
-        # are sized for the *largest* bucket (``self.n_per_sample``);
-        # shorter buckets under-fill them.
+        # needs them, and the non-cuda-graph path benefits from stable
+        # addresses. They are sized for the *largest* bucket
+        # (``self.n_per_sample``); shorter buckets under-fill them.
         self.attn_backend.init_cuda_graph_state(
             max_batch_size=self.batch_size,
             max_num_tokens=self.batch_size * self.n_per_sample,
@@ -422,8 +378,8 @@ class PI05LLMRunner(ModelRunner):
         """Stage attention metadata for the next ``forward`` call.
 
         Graph mode: re-plan the captured backend buffers in place via
-        :meth:`ARAttentionBackend.replay_metadata`. Eager mode: build a
-        fresh plan via :meth:`ARAttentionBackend.init_forward_metadata`.
+        :meth:`ARAttentionBackend.replay_metadata`. Non-graph mode: build
+        a fresh plan via :meth:`ARAttentionBackend.init_forward_metadata`.
         """
         if self.use_cuda_graph:
             self.attn_backend.replay_metadata(self._capture_plan, meta)
@@ -437,7 +393,7 @@ class PI05LLMRunner(ModelRunner):
 
         ``n_per_sample`` selects which captured graph to replay (the
         scheduler builds ``batch`` at that bucket's length). ``None`` uses
-        the largest bucket. Ignored on the eager fallback.
+        the largest bucket. Ignored in the non-cuda-graph path.
         """
         if self.use_cuda_graph and self.graphs:
             n_ps = n_per_sample if n_per_sample is not None else self.n_per_sample
@@ -455,7 +411,7 @@ class PI05LLMRunner(ModelRunner):
                 }
             )
             return None
-        # Eager fallback (eager backend or non-cuda-graph mode).
+        # Non-cuda-graph path.
         self._fwd(
             hidden_states=batch.hidden_states,
             position_ids=batch.position_ids,

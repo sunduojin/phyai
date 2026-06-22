@@ -133,7 +133,8 @@ def main() -> None:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--checkpoint",
+        "--check" \
+        "point",
         type=Path,
         default=None,
         help=(

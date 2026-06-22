@@ -411,8 +411,8 @@ class PI0VisionTower(nn.Module):
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
         h = self.vision_tower(pixel_values)
         h = self.multi_modal_projector(h)
-        return h * self.projection_scale
-
+        #return h * self.projection_scale
+        return h
 
 class PaliGemmaEmbedTokens(nn.Module):
     """Gemma vocab embedding using the tied PaliGemma LM-head key."""
@@ -433,7 +433,8 @@ class PaliGemmaEmbedTokens(nn.Module):
             num_embeddings=config.vocab_size,
             embedding_dim=config.hidden_size,
             params_dtype=params_dtype,
-            embed_scale=float(config.hidden_size),
+            #embed_scale=torch.tensor(config.hidden_size, dtype=torch.float32).sqrt().item(),
+            embed_scale=float(config.hidden_size) ** 0.5,
             prefix=prefix,
         )
 

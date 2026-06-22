@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ls \"D:/Study/Research Phase 0/phyai/phyai/src/phyai\" 2>&1)",
+      "Read(//d/Study/Research Phase 0/phyai/phyai/src/phyai/**)",
+      "Bash(ls \"D:/Study/Research Phase 0/phyai/docs/models/pi0\" \"D:/Study/Research Phase 0/phyai/docs/models/pi05\" 2>&1)",
+      "Read(//d/Study/Research Phase 0/phyai/docs/models/pi0/**)",
+      "Bash(cat \"D:/Study/Research Phase 0/phyai/docs/models/pi05/ws1.mdx\" 2>&1 | head -150)",
+      "Read(//d/Study/Research Phase 0/phyai/docs/models/pi05/**)",
+      "Bash(cat \"D:/Study/Research Phase 0/phyai/docs/modeling/pi0_inference_spec.mdx\" 2>&1 | head -120)",
+      "Read(//d/Study/Research Phase 0/phyai/docs/modeling/**)"
+    ]
+  }
+}

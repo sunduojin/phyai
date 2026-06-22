@@ -28,9 +28,24 @@
               {
                 "group": "PI0.5",
                 "pages": [
-                  "models/pi05/ws1"
+                  "models/pi05/ws1",
+                  "models/pi05/processors"
+                ]
+              },
+              {
+                "group": "Cosmos",
+                "pages": [
+                  "models/cosmos/ws1",
+                  "models/cosmos/ws1_policy",
+                  "models/cosmos/processors"
                 ]
               }
+            ]
+          },
+          {
+            "group": "Tools",
+            "pages": [
+              "tools/tensor-dump"
             ]
           }
         ]
@@ -52,9 +67,24 @@
               {
                 "group": "PI0.5",
                 "pages": [
-                  "zh/models/pi05/ws1"
+                  "zh/models/pi05/ws1",
+                  "zh/models/pi05/processors"
+                ]
+              },
+              {
+                "group": "Cosmos",
+                "pages": [
+                  "zh/models/cosmos/ws1",
+                  "zh/models/cosmos/ws1_policy",
+                  "zh/models/cosmos/processors"
                 ]
               }
+            ]
+          },
+          {
+            "group": "工具",
+            "pages": [
+              "zh/tools/tensor-dump"
             ]
           }
         ]

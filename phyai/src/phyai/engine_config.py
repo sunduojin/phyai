@@ -45,6 +45,7 @@ pattern is to install the config first and then build models.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field, replace
 from threading import Lock
 
@@ -92,11 +93,11 @@ class BackendConfig:
         :class:`~phyai.layers.attention.DiffusionAttention`); each
         stack's per-construction lookup resolves it against its own
         registry. Production names: ``"flashinfer"`` (default) /
-        ``"sdpa"`` / ``"eager"``. ``"sdpa"`` only registers in the
-        no-cache stack — code that picks paged backends for AR or
-        diffusion derives ``"eager"`` as the fallback when ``attn`` is
-        ``"sdpa"`` (see ``_engine_to_paged_backend`` in pi05's
-        ``modeling_pi05``).
+        ``"sdpa"`` / ``"eager"``. ``"sdpa"`` and ``"eager"`` only
+        register in the no-cache stack — the AR and diffusion paged
+        stacks are flashinfer-only (GPU). Code that picks paged
+        backends rejects non-flashinfer names (see
+        ``_engine_to_paged_backend`` in pi05's ``modeling_pi05``).
     norm:
         :class:`~phyai.layers.layer_norm.RMSNorm` / ``LayerNorm``
         backend (``"flashinfer"`` / ``"phyai-kernel"``).
@@ -325,12 +326,39 @@ class RuntimeConfig:
         under that name regardless of (spec, regime). Useful for A/B
         comparisons; ``None`` lets the registry's ``prefer_for``
         ordering decide.
+    debug_tensor_dump_dir:
+        Base directory for forward-hook activation dumps. ``None`` (the
+        default) disables dumping. When set, the engine records every
+        selected leaf operator's output to
+        ``<dir>/rank{R}_pid{P}/pass{N}.pt`` — one file per
+        :meth:`~phyai.engine.Engine.step`. Because a captured CUDA graph
+        replays without re-entering Python (so forward hooks never fire),
+        the engine **forces ``use_cuda_graph`` off** whenever this is set;
+        expect eager-mode speed while dumping. See
+        :mod:`phyai.runtime.tensor_dump`.
+    debug_tensor_dump_filter:
+        Optional tuple of regex strings selecting which operators to dump,
+        matched against each operator's full dotted name
+        (``model.expert_stack.layers.0.o_proj``). A leaf is recorded if
+        **any** pattern ``re.search``-matches (a union). ``None`` records
+        every operator. Mutually exclusive with
+        ``debug_tensor_dump_filter_fn``. No effect unless
+        ``debug_tensor_dump_dir`` is also set.
+    debug_tensor_dump_filter_fn:
+        Optional ``"pkg.module:func"`` / ``"/path/to/file.py:func"`` path
+        to a ``(name, module) -> bool`` predicate, for selection logic a
+        regex can't express. Mutually exclusive with
+        ``debug_tensor_dump_filter``. No effect unless
+        ``debug_tensor_dump_dir`` is also set.
     """
 
     use_cuda_graph: bool = True
     flashinfer_workspace_bytes: int = 128 * 1024 * 1024
     flashinfer_prefill_backend: str | None = None
     force_linear_kernel: str | None = None
+    debug_tensor_dump_dir: str | None = None
+    debug_tensor_dump_filter: tuple[str, ...] | None = None
+    debug_tensor_dump_filter_fn: str | None = None
 
     def __post_init__(self) -> None:
         v = self.flashinfer_workspace_bytes
@@ -346,6 +374,30 @@ class RuntimeConfig:
                 f"None or one of {sorted(_VALID_FLASHINFER_PREFILL_BACKENDS)} "
                 f"(the names BatchPrefillWithPagedKVCacheWrapper accepts; "
                 f"'cute-dsl' is paged-incompatible)."
+            )
+        flt = self.debug_tensor_dump_filter
+        if flt is not None:
+            if not isinstance(flt, tuple) or not all(isinstance(x, str) for x in flt):
+                raise ValueError(
+                    f"RuntimeConfig.debug_tensor_dump_filter must be None or a "
+                    f"tuple of regex strings, got {flt!r}."
+                )
+            for pat in flt:
+                try:
+                    re.compile(pat)
+                except re.error as e:
+                    raise ValueError(
+                        f"RuntimeConfig.debug_tensor_dump_filter has an invalid "
+                        f"regex {pat!r}: {e}"
+                    ) from e
+        if (
+            self.debug_tensor_dump_filter is not None
+            and self.debug_tensor_dump_filter_fn is not None
+        ):
+            raise ValueError(
+                "RuntimeConfig.debug_tensor_dump_filter and "
+                "debug_tensor_dump_filter_fn are mutually exclusive; set at "
+                "most one."
             )
         # ``force_linear_kernel`` is *not* validated against the global
         # linear-kernel registry: a kernel registered into a
@@ -449,6 +501,12 @@ class EngineConfig:
             runtime_kw["flashinfer_prefill_backend"] = v
         if (v := envs.PHYAI_FORCE_LINEAR_KERNEL.get()) is not None:
             runtime_kw["force_linear_kernel"] = v
+        if (v := envs.PHYAI_DEBUG_TENSOR_DUMP_DIR.get()) is not None:
+            runtime_kw["debug_tensor_dump_dir"] = v
+        if (v := envs.PHYAI_DEBUG_TENSOR_DUMP_FILTER.get()) is not None:
+            runtime_kw["debug_tensor_dump_filter"] = v
+        if (v := envs.PHYAI_DEBUG_TENSOR_DUMP_FILTER_FN.get()) is not None:
+            runtime_kw["debug_tensor_dump_filter_fn"] = v
 
         return cls(
             backends=replace(base.backends, **backends_kw)
@@ -538,6 +596,33 @@ def init_engine_config(cfg: EngineConfig) -> EngineConfig:
     return cfg
 
 
+def resolve_engine_defaults(
+    params_dtype: torch.dtype | None,
+    attn_backend: str | None,
+    norm_backend: str | None,
+) -> tuple[torch.dtype, str, str]:
+    """Fill in ``None`` overrides from the process :class:`EngineConfig`.
+
+    Short-circuits when every argument is already a concrete override, so a
+    parent that has already resolved defaults can pass them through to a
+    child constructor without a second singleton read. Callers that
+    don't need ``attn_backend`` (norm-only sub-modules) just discard the
+    returned value.
+    """
+    if (
+        params_dtype is not None
+        and attn_backend is not None
+        and norm_backend is not None
+    ):
+        return params_dtype, attn_backend, norm_backend
+    ec = get_engine_config()
+    return (
+        ec.device.params_dtype if params_dtype is None else params_dtype,
+        ec.backends.attn if attn_backend is None else attn_backend,
+        ec.backends.norm if norm_backend is None else norm_backend,
+    )
+
+
 __all__ = [
     "BackendConfig",
     "DeviceConfig",
@@ -546,5 +631,6 @@ __all__ = [
     "RuntimeConfig",
     "get_engine_config",
     "init_engine_config",
+    "resolve_engine_defaults",
     "set_engine_config",
 ]
