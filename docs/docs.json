@@ -26,6 +26,12 @@
             "group": "Models",
             "pages": [
               {
+                "group": "PI0",
+                "pages": [
+                  "models/pi0/ws1"
+                ]
+              },
+              {
                 "group": "PI0.5",
                 "pages": [
                   "models/pi05/ws1",
