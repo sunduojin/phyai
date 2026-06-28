@@ -80,6 +80,7 @@ class PI0Args(EntryArgs):
     max_batch_size: int = 1
     weight_remap: Callable[[str], str | None] | dict[str, str] | None = None
     weight_strict: bool = True
+    vision_params_dtype: torch.dtype | None = torch.float32
 
 
 @Engine.register
@@ -104,7 +105,11 @@ class PI0Entry(Entry):
         else:
             config = PI0Config()
 
-        self.model = PI0Model(config, device=eng.device.target)
+        self.model = PI0Model(
+            config,
+            vision_params_dtype=args.vision_params_dtype,
+            device=eng.device.target,
+        )
         if args.checkpoint_dir is not None:
             load_pretrained(
                 self.model,

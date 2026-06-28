@@ -194,9 +194,10 @@ class PI0WS1Scheduler(Scheduler):
         self.max_batch_size = int(max_batch_size)
         if self.max_batch_size <= 0:
             raise ValueError(f"max_batch_size must be positive, got {max_batch_size}.")
+        self.num_images = cfg.num_images
         self.model = model
 
-        self.image_token_count = cfg.vision.num_patches * 3
+        self.image_token_count = cfg.vision.num_patches * self.num_images
         self.n_per_sample = self.image_token_count + cfg.tokenizer_max_length
         self.suffix_len = cfg.suffix_len
 
@@ -224,6 +225,7 @@ class PI0WS1Scheduler(Scheduler):
 
         self.vision_runner = PI0VisionRunner(
             model.vision,
+            num_images=self.num_images,
             params_dtype=self.params_dtype,
             device=self.device,
             use_cuda_graph=use_cuda_graph,
@@ -506,19 +508,33 @@ class PI0WS1Scheduler(Scheduler):
 
     def _validate(self, req: PI0Request) -> None:
         cfg = self.cfg
+        if req.pixel_values.dim() != 5:
+            raise ValueError(
+                f"pixel_values must be 5-D (B, num_images, C, image_size, "
+                f"image_size); got shape {tuple(req.pixel_values.shape)}."
+            )
         actual_B = int(req.pixel_values.shape[0])
         if not 1 <= actual_B <= self.max_batch_size:
             raise ValueError(
                 f"pixel_values batch dim {actual_B} not in "
                 f"[1, max_batch_size={self.max_batch_size}]."
             )
-        if req.pixel_values.shape[1] != 3:
+        if req.pixel_values.shape[1] != self.num_images:
             raise ValueError(
-                f"pixel_values must have 3 cameras, got {req.pixel_values.shape[1]}."
+                f"pixel_values has {req.pixel_values.shape[1]} cameras, "
+                f"expected {self.num_images}."
             )
-        if req.pixel_values.shape[-1] != cfg.vision.image_size:
+        if req.pixel_values.shape[2] != cfg.vision.num_channels:
             raise ValueError(
-                f"pixel_values H/W {req.pixel_values.shape[-2:]} != "
+                f"pixel_values channel dim {req.pixel_values.shape[2]} != "
+                f"num_channels {cfg.vision.num_channels}."
+            )
+        if req.pixel_values.shape[-2:] != (
+            cfg.vision.image_size,
+            cfg.vision.image_size,
+        ):
+            raise ValueError(
+                f"pixel_values H/W {tuple(req.pixel_values.shape[-2:])} != "
                 f"image_size {cfg.vision.image_size}."
             )
         if req.input_ids.shape != (actual_B, cfg.tokenizer_max_length):

@@ -126,6 +126,14 @@ def _engine_to_paged_backend(attn_backend: str) -> str:
     return canonical
 
 
+def _vision_norm_backend(norm_backend: str, vision_dtype: torch.dtype) -> str:
+    """Pick a norm backend that accepts the vision tower's compute dtype."""
+
+    if norm_backend == "flashinfer" and vision_dtype != torch.bfloat16:
+        return "phyai-kernel"
+    return norm_backend
+
+
 SIGLIP_NORM_HF_NAMES: dict[str, str] = {
     "input_layernorm": "layer_norm1",
     "post_attention_layernorm": "layer_norm2",
@@ -382,6 +390,7 @@ class PI0VisionTower(nn.Module):
         config: SiglipVisionConfig,
         *,
         params_dtype: torch.dtype | None = None,
+        io_dtype: torch.dtype | None = None,
         attn_backend: str | None = None,
         norm_backend: str | None = None,
         prefix: str = DEFAULT_PREFIX,
@@ -390,13 +399,16 @@ class PI0VisionTower(nn.Module):
         params_dtype, attn_backend, norm_backend = _resolve_engine_defaults(
             params_dtype, attn_backend, norm_backend
         )
+        self.compute_dtype = params_dtype
+        self.io_dtype = io_dtype if io_dtype is not None else params_dtype
+        vision_norm_backend = _vision_norm_backend(norm_backend, params_dtype)
         self.config = config
         self.prefix = prefix
         self.vision_tower = VisionTowerWrapper(
             config,
             params_dtype=params_dtype,
             attn_backend=attn_backend,
-            norm_backend=norm_backend,
+            norm_backend=vision_norm_backend,
             prefix=f"{prefix}.vision_tower" if prefix else "vision_tower",
         )
         self.multi_modal_projector = MultiModalProjector(
@@ -409,10 +421,12 @@ class PI0VisionTower(nn.Module):
         self.projection_scale = float(config.projection_dim) ** 0.5
 
     def forward(self, pixel_values: torch.Tensor) -> torch.Tensor:
-        h = self.vision_tower(pixel_values)
+        x = pixel_values.to(self.compute_dtype)
+        h = self.vision_tower(x)
         h = self.multi_modal_projector(h)
-        #return h * self.projection_scale
-        return h
+        # return h * self.projection_scale
+        return h.to(self.io_dtype)
+
 
 class PaliGemmaEmbedTokens(nn.Module):
     """Gemma vocab embedding using the tied PaliGemma LM-head key."""
@@ -433,7 +447,7 @@ class PaliGemmaEmbedTokens(nn.Module):
             num_embeddings=config.vocab_size,
             embedding_dim=config.hidden_size,
             params_dtype=params_dtype,
-            #embed_scale=torch.tensor(config.hidden_size, dtype=torch.float32).sqrt().item(),
+            # embed_scale=torch.tensor(config.hidden_size, dtype=torch.float32).sqrt().item(),
             embed_scale=float(config.hidden_size) ** 0.5,
             prefix=prefix,
         )
@@ -640,9 +654,7 @@ def create_sinusoidal_pos_embedding(
     period = min_period * (max_period / min_period) ** fraction
     scaling = 1.0 / period * 2.0 * math.pi
     sin_input = scaling[None, :] * time[:, None].to(torch.float32)
-    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1).to(
-        time.dtype
-    )
+    return torch.cat([torch.sin(sin_input), torch.cos(sin_input)], dim=1).to(time.dtype)
 
 
 class PI0ExpertLayer(nn.Module):
@@ -972,6 +984,7 @@ class PI0Model(nn.Module):
         config: PI0Config,
         *,
         params_dtype: torch.dtype | None = None,
+        vision_params_dtype: torch.dtype | None = torch.float32,
         attn_backend: str | None = None,
         norm_backend: str | None = None,
         rope_backend: str | None = None,
@@ -981,10 +994,14 @@ class PI0Model(nn.Module):
         params_dtype, attn_backend, norm_backend = _resolve_engine_defaults(
             params_dtype, attn_backend, norm_backend
         )
+        vision_dtype = (
+            vision_params_dtype if vision_params_dtype is not None else params_dtype
+        )
         if rope_backend is None:
             rope_backend = "flashinfer" if attn_backend == "flashinfer" else "eager"
         self.config = config
         self.params_dtype = params_dtype
+        self.vision_params_dtype = vision_dtype
         self.attn_backend = attn_backend
 
         vision_attn_backend = attn_backend
@@ -1005,7 +1022,8 @@ class PI0Model(nn.Module):
 
         self.vision = PI0VisionTower(
             config.vision,
-            params_dtype=params_dtype,
+            params_dtype=vision_dtype,
+            io_dtype=params_dtype,
             attn_backend=vision_attn_backend,
             norm_backend=norm_backend,
         )

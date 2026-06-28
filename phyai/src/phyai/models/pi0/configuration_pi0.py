@@ -145,7 +145,8 @@ class PI0Config(PretrainedConfig):
     num_inference_steps: int = 10
     min_period: float = 4e-3
     max_period: float = 4.0
-    tokenizer_max_length: int = 48  
+    tokenizer_max_length: int = 48
+    empty_cameras: int = 0
 
     def __post_init__(self) -> None:
         if self.vision.projection_dim != self.text.hidden_size:
@@ -191,13 +192,16 @@ class PI0Config(PretrainedConfig):
             )
         if self.num_inference_steps <= 0:
             raise ValueError(
-                f"num_inference_steps must be positive, got "
-                f"{self.num_inference_steps}."
+                f"num_inference_steps must be positive, got {self.num_inference_steps}."
             )
         if self.tokenizer_max_length <= 0:
             raise ValueError(
                 f"tokenizer_max_length must be positive, got "
                 f"{self.tokenizer_max_length}."
+            )
+        if self.empty_cameras not in (0, 1):
+            raise ValueError(
+                f"empty_cameras must be 0 or 1 for pi0, got {self.empty_cameras}."
             )
 
     @property
@@ -211,6 +215,12 @@ class PI0Config(PretrainedConfig):
         """Number of expert-side suffix tokens: state token + action chunk."""
 
         return 1 + self.chunk_size
+
+    @property
+    def num_images(self) -> int:
+        """Number of real camera streams consumed by this pi0 checkpoint."""
+
+        return 3 - self.empty_cameras
 
 
 __all__ = [

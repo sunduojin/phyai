@@ -73,11 +73,15 @@ class PI0VisionRunner(ModelRunner):
         self,
         vision_tower: PI0VisionTower,
         *,
+        num_images: int = 3,
         params_dtype: torch.dtype,
         device: torch.device | str,
         use_cuda_graph: bool = True,
     ) -> None:
         self.vision_tower = vision_tower
+        self.num_images = int(num_images)
+        if self.num_images <= 0:
+            raise ValueError(f"num_images must be positive, got {num_images}.")
         self.params_dtype = params_dtype
         self.device = torch.device(device)
         self.use_cuda_graph = bool(use_cuda_graph)
@@ -89,9 +93,19 @@ class PI0VisionRunner(ModelRunner):
         all_ranks_log(logger, logging.INFO, "Entering PI0VisionRunner.setup")
         if not self.use_cuda_graph or self.device.type != "cuda":
             return
+        all_ranks_log(
+            logger,
+            logging.INFO,
+            "Entering PI0VisionRunner.setup: capturing vision-tower CUDA graph "
+            "at fixed shape (%d, %d, %d, %d).",
+            self.num_images,
+            self.num_channels,
+            self.image_size,
+            self.image_size,
+        )
         example = {
             "pixel_values": torch.zeros(
-                3,
+                self.num_images,
                 self.num_channels,
                 self.image_size,
                 self.image_size,
@@ -486,7 +500,9 @@ class PI0ExpertRunner(ModelRunner):
                 dtype=self.params_dtype,
                 device=self.device,
             ),
-            "time": torch.zeros(self.batch_size, dtype=torch.float32, device=self.device),
+            "time": torch.zeros(
+                self.batch_size, dtype=torch.float32, device=self.device
+            ),
         }
         self.graph = CudaGraph()
         self.graph.capture(self._fwd, example)
@@ -543,7 +559,9 @@ class PI0ExpertRunner(ModelRunner):
         action_meta: DiffusionAttnMetadata,
     ) -> None:
         if state_meta.position_ids is None:
-            raise ValueError("PI0ExpertRunner.plan_inference requires state position_ids.")
+            raise ValueError(
+                "PI0ExpertRunner.plan_inference requires state position_ids."
+            )
         if action_meta.position_ids is None:
             raise ValueError("PI0ExpertRunner.plan_inference requires position_ids.")
         self.pos_ids_state_buf.copy_(state_meta.position_ids.to(torch.int32))
